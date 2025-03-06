@@ -10,19 +10,15 @@ let checkInterval = 60 * 1000;  // 1 minute in milliseconds - default value, wil
 // Virtual component handles
 let highFreqHandle = null;
 let lowFreqHandle = null;
-let minTimeHandle = null;
-let intervalHandle = null;
 let statusHandle = null;
-let groupHandle = null;
 
 // State variables
-let lastSwitchedOnTime = 0;     // When we last turned the relay on
+let lastSwitchedOnTime = 0;      // When we last turned the relay on
 let scriptControlledOn = false;  // Flag to track if WE turned it on (vs. external control)
 let currentFreq = 0;             // Current frequency reading
 let relayIsOn = false;           // Current relay state
 let inputIsActive = false;       // State of the input
 let debugMode = true;            // Enable debug logging
-let componentsInitialized = false;
 let timerId = null;
 
 // Helper function for logging
@@ -55,12 +51,13 @@ function updateStatus(event) {
   logDebug("Status update: " + statusMessage);
   
   // Update status virtual component if available
-  if (statusHandle && componentsInitialized) {
-    try {
-      statusHandle.setValue(statusMessage);
-    } catch (e) {
-      console.log("Error updating status component: " + e.message);
-    }
+  if (!statusHandle)
+    return;
+  
+  try {
+    statusHandle.setValue(statusMessage);
+  } catch (e) {
+    console.log("Error updating status component: " + e.message);
   }
 }
 
@@ -99,15 +96,6 @@ function setupVirtualComponents(existingComponentKeys) {
     });
   } else {
     logDebug("High frequency component already exists");
-    try {
-      highFreqHandle = Virtual.getHandle("number:200");
-      if (highFreqHandle && highFreqHandle.getValue() !== undefined) {
-        highFreqThreshold = parseFloat(highFreqHandle.getValue());
-        logDebug("Loaded high frequency threshold: " + highFreqThreshold);
-      }
-    } catch (e) {
-      console.log("Error getting high frequency handle: " + e.message);
-    }
   }
   
   // Step 2: Create or get low frequency component
@@ -133,15 +121,6 @@ function setupVirtualComponents(existingComponentKeys) {
     });
   } else {
     logDebug("Low frequency component already exists");
-    try {
-      lowFreqHandle = Virtual.getHandle("number:201");
-      if (lowFreqHandle && lowFreqHandle.getValue() !== undefined) {
-        lowFreqThreshold = parseFloat(lowFreqHandle.getValue());
-        logDebug("Loaded low frequency threshold: " + lowFreqThreshold);
-      }
-    } catch (e) {
-      console.log("Error getting low frequency handle: " + e.message);
-    }
   }
   
   // Step 3: Create or get status component 
@@ -162,11 +141,6 @@ function setupVirtualComponents(existingComponentKeys) {
     });
   } else {
     logDebug("Status component already exists");
-    try {
-      statusHandle = Virtual.getHandle("text:204");
-    } catch (e) {
-      console.log("Error getting status handle: " + e.message);
-    }
   }
   
   // Step 4: Create or get group component to make all components visible in the UI
@@ -201,13 +175,13 @@ function finishSetup() {
     // Get values from components
     if (highFreqHandle && highFreqHandle.getValue() !== undefined) {
       highFreqThreshold = parseFloat(highFreqHandle.getValue());
+      logDebug("Loaded high frequency threshold: " + highFreqThreshold);
     }
     
     if (lowFreqHandle && lowFreqHandle.getValue() !== undefined) {
       lowFreqThreshold = parseFloat(lowFreqHandle.getValue());
+      logDebug("Loaded low frequency threshold: " + lowFreqThreshold);
     }
-    
-    componentsInitialized = true;
     
     // Set up event handlers
     setupEventHandlers();
