@@ -6,7 +6,7 @@ let highFreqThreshold = 50.5;  // Hz - default value, will be overridden by virt
 let lowFreqThreshold = 50.4;   // Hz - default value, will be overridden by virtual component
 let minOnTime = 10 * 60 * 1000; // 10 minutes in milliseconds
 let checkInterval = 30 * 1000;  // 30 seconds in milliseconds
-let requiredHighReadings = 3;   // Number of consecutive high frequency readings required before triggering
+let requiredHighReadings = 2;   // Number of consecutive high frequency readings required before triggering
 
 // Virtual component handles
 let highFreqHandle = null;
