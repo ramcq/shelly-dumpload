@@ -4,8 +4,9 @@
 // Configuration using virtual components for user-adjustable settings
 let highFreqThreshold = 50.5;  // Hz - default value, will be overridden by virtual component
 let lowFreqThreshold = 50.4;   // Hz - default value, will be overridden by virtual component
-let minOnTime = 10 * 60 * 1000; // 10 minutes in milliseconds - default value, will be overridden
-let checkInterval = 60 * 1000;  // 1 minute in milliseconds - default value, will be overridden
+let minOnTime = 10 * 60 * 1000; // 10 minutes in milliseconds
+let checkInterval = 30 * 1000;  // 30 seconds in milliseconds
+let requiredHighReadings = 3;   // Number of consecutive high frequency readings required before triggering
 
 // Virtual component handles
 let highFreqHandle = null;
@@ -19,6 +20,7 @@ let currentFreq = 0;             // Current frequency reading
 let relayIsOn = false;           // Current relay state
 let inputIsActive = false;       // State of the input
 let debugMode = true;            // Enable debug logging
+let consecutiveHighReadings = 0; // Count of consecutive readings above high threshold
 let timerId = null;
 
 // Helper function for logging
@@ -35,6 +37,7 @@ function logConfiguration() {
   console.log("Low Frequency Threshold: " + lowFreqThreshold + " Hz");
   console.log("Minimum On Time: " + (minOnTime / (60 * 1000)) + " minutes");
   console.log("Check Interval: " + (checkInterval / 1000) + " seconds");
+  console.log("Required High Frequency Readings: " + requiredHighReadings);
   console.log("=========================================");
 }
 
@@ -45,15 +48,16 @@ function updateStatus(event) {
   let relayPart = relayIsOn ? "Relay ON" : "Relay OFF";
   let controlPart = relayIsOn ? (scriptControlledOn ? " (script)" : " (external)") : "";
   let inputPart = ", Input " + (inputIsActive ? "ON" : "OFF");
-  let eventPart = event ? " - " + event : "";
+  let countPart = consecutiveHighReadings > 0 ? " (High count: " + consecutiveHighReadings + ")" : "";
+  let eventPart = event ? ": " + event : "";
   
-  let statusMessage = freqPart + thresholdInfo + ", " + relayPart + controlPart + inputPart + eventPart;
+  let statusMessage = freqPart + thresholdInfo + ", " + relayPart + controlPart + inputPart + countPart + eventPart;
   logDebug("Status update: " + statusMessage);
   
   // Update status virtual component if available
   if (!statusHandle)
     return;
-  
+    
   try {
     statusHandle.setValue(statusMessage);
   } catch (e) {
@@ -208,6 +212,8 @@ function setupEventHandlers() {
     try {
       highFreqHandle.on("change", function(ev_info) {
         highFreqThreshold = parseFloat(ev_info.value || highFreqThreshold);
+        // Reset consecutive counter when threshold changes
+        consecutiveHighReadings = 0;
         updateStatus("High threshold updated to " + highFreqThreshold);
       });
     } catch (e) {
@@ -354,7 +360,10 @@ function turnRelayOn() {
       scriptControlledOn = true;
       relayIsOn = true;
       lastSwitchedOnTime = Date.now();
-      updateStatus("Frequency high - activating relay");
+      updateStatus("Frequency high for " + consecutiveHighReadings + "/" + requiredHighReadings + " readings - activating relay");
+      
+      // Reset high readings counter after action taken
+      consecutiveHighReadings = 0;
     }
   );
 }
@@ -388,7 +397,7 @@ function turnRelayOff() {
       
       scriptControlledOn = false;
       relayIsOn = false;
-      updateStatus("Frequency normal - deactivating relay");
+      updateStatus("Frequency low - deactivating relay");
     }
   );
 }
@@ -425,21 +434,34 @@ function checkFrequency() {
       // Also update input state
       updateInputState();
       
+      // Process frequency readings with thresholds and update consecutive counters
+      if (currentFreq >= highFreqThreshold) {
+        consecutiveHighReadings++;
+        logDebug("High frequency detected: " + currentFreq + "Hz >= " + highFreqThreshold + 
+                 "Hz, Consecutive readings: " + consecutiveHighReadings + "/" + requiredHighReadings);
+      } else {
+        // Reset counter if frequency drops below threshold
+        consecutiveHighReadings = 0;
+        logDebug("Normal or low frequency: " + currentFreq + "Hz, below high threshold");
+      }
+      
       // Update status
       updateStatus("Monitoring");
-
-      // Check against thresholds
-      if (currentFreq >= highFreqThreshold && !relayIsOn) {
-        // Frequency is high and relay is off - turn it on
-        logDebug("High frequency detected: " + currentFreq + "Hz >= " + highFreqThreshold + "Hz");
+      
+      // Check if action should be taken based on consecutive readings
+      if (consecutiveHighReadings >= requiredHighReadings && !relayIsOn) {
+        // Frequency has been high for required number of readings and relay is off - turn it on
+        logDebug("High frequency confirmed for " + consecutiveHighReadings + "/" + requiredHighReadings + " consecutive readings");
         turnRelayOn();
         return;
       }
       
-      if (currentFreq <= lowFreqThreshold && relayIsOn && scriptControlledOn && timeElapsed >= minOnTime) {
-        // Frequency is low, relay is on, script controlled it, and minimum time has elapsed
-        logDebug("Low frequency detected: " + currentFreq + "Hz <= " + lowFreqThreshold + "Hz, " +
-                 "Time elapsed: " + Math.floor(timeElapsed/1000) + "s >= Min time: " + Math.floor(minOnTime/1000) + "s");
+      if (currentFreq <= lowFreqThreshold && 
+          relayIsOn && scriptControlledOn && timeElapsed >= minOnTime) {
+        // Frequency is below low threshold, relay is on, script controlled it, 
+        // and minimum time has elapsed
+        logDebug("Low frequency detected: " + currentFreq + "Hz <= " + lowFreqThreshold + 
+                 "Hz, Time elapsed: " + Math.floor(timeElapsed/1000) + "s >= Min time: " + Math.floor(minOnTime/1000) + "s");
         turnRelayOff();
         return;
       }
