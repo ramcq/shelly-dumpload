@@ -32,7 +32,6 @@ let state = {
   reconnectTimer: null,
   lastKeepaliveId: null,
   mqttValues: {},
-  fullPublishCompleted: false
 };
 
 // Component handles
@@ -214,15 +213,6 @@ function processMqttMessage(topic, message) {
     if (topic.indexOf(topicPrefix) === 0) {
       let relativeTopic = topic.substring(topicPrefix.length);
       
-      // Special handling for full_publish_completed
-      if (topic === topicPrefix + "full_publish_completed") {
-        if (payload.hasOwnProperty("value")) {
-          state.fullPublishCompleted = true;
-          logDebug("Full publish completed at timestamp: " + payload.value);
-        }
-        return;
-      }
-      
       // Store value in our state
       state.mqttValues[relativeTopic] = payload;
       
@@ -246,9 +236,6 @@ function handleMqttConnected() {
     MQTT.subscribe(topic, processMqttMessage);
     logDebug("Subscribed to: " + topic);
   }
-  
-  // Subscribe to the full_publish_completed topic
-  MQTT.subscribe(topicPrefix + "full_publish_completed", processMqttMessage);
   
   // Send initial keepalive
   sendKeepalive(false);
@@ -356,14 +343,6 @@ function sendKeepalive(suppressRepublish) {
     payload = JSON.stringify({
       "keepalive-options": ["suppress-republish"]
     });
-  } else {
-    // Generate a random ID for this keepalive
-    state.lastKeepaliveId = generateRandomString(16);
-    payload = JSON.stringify({
-      "keepalive-options": [{
-        "full-publish-completed-echo": state.lastKeepaliveId
-      }]
-    });
   }
   
   MQTT.publish(keepaliveTopic, payload, 1, false);
@@ -379,16 +358,6 @@ function scheduleReconnect() {
       connectMqtt();
     });
   }
-}
-
-// Generate random string for keepalive ID
-function generateRandomString(length) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
 }
 
 // Initialize the script
