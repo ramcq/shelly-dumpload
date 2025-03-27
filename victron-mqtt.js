@@ -31,7 +31,6 @@ let state = {
   keepaliveTimer: null,
   reconnectTimer: null,
   lastKeepaliveId: null,
-  mqttValues: {},
 };
 
 // Component handles
@@ -152,34 +151,6 @@ function finishSetup() {
   }
 }
 
-// Update virtual components with the latest values
-function updateComponents() {
-  // Update battery SOC
-  if (state.mqttValues.hasOwnProperty(config.topics.batterySOC)) {
-    let socValue = state.mqttValues[config.topics.batterySOC]?.value;
-    if (socValue !== undefined && socValue !== null) {
-      // Update virtual component
-      if (batterySOCHandle) {
-        batterySOCHandle.setValue(socValue);
-        logDebug("Updated battery SOC: " + socValue + "%");
-      }
-    }
-  }
-  
-  // Update AC input status
-  if (state.mqttValues.hasOwnProperty(config.topics.acSource)) {
-    let acSource = state.mqttValues[config.topics.acSource]?.value;
-    // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore power; 240=Not connected
-    let isConnected = (acSource !== null && acSource !== undefined && acSource !== 240);
-    
-    // Update virtual component
-    if (acConnectedHandle) {
-      acConnectedHandle.setValue(isConnected);
-      logDebug("Updated AC connected: " + isConnected + " (Source: " + acSource + ")");
-    }
-  }
-}
-
 // Reset component values when disconnected
 function resetComponents() {
   // For Boolean components, set to false (not null) as booleans can't hold null
@@ -203,6 +174,8 @@ function processMqttMessage(topic, message) {
     return;
   }
   
+  logDebug("Received message (topic " + topic + "): " + message);
+  
   try {
     let payload = JSON.parse(message);
     
@@ -210,14 +183,29 @@ function processMqttMessage(topic, message) {
     let topicPrefix = "N/" + config.cerbo.portalId + "/";
     
     // Check if topic starts with prefix (Shelly doesn't have String.startsWith)
-    if (topic.indexOf(topicPrefix) === 0) {
-      let relativeTopic = topic.substring(topicPrefix.length);
+    if (topic.indexOf(topicPrefix) !== 0)
+      return;
+    
+    let relativeTopic = topic.substring(topicPrefix.length);
+    
+    if (!payload.hasOwnProperty("value") || payload.value === null) {
+      logDebug("Ignoring message with null value");
+      return;
+    }
+    
+    // Update battery SOC
+    if (relativeTopic == config.topics.batterySOC && batterySOCHandle) {
+        batterySOCHandle.setValue(payload.value);
+        logDebug("Updated battery SOC: " + payload.value + "%");
+    }
+    
+    // Update AC input status
+    if (relativeTopic == config.topics.acSource && acConnectedHandle) {
+      // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore power; 240=Not connected
+      let isConnected = (payload.value !== 240);
       
-      // Store value in our state
-      state.mqttValues[relativeTopic] = payload;
-      
-      // Update components with new data
-      updateComponents();
+      acConnectedHandle.setValue(isConnected);
+      logDebug("Updated AC connected: " + isConnected + " (Source: " + payload.value + ")");
     }
   } catch (e) {
     console.log("Error processing message: " + e.message);
