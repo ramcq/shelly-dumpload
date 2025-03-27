@@ -209,7 +209,9 @@ function processMqttMessage(topic, message) {
     
     // Extract the relative topic (without the N/<portalId>/ prefix)
     let topicPrefix = "N/" + config.cerbo.portalId + "/";
-    if (topic.startsWith(topicPrefix)) {
+    
+    // Check if topic starts with prefix (Shelly doesn't have String.startsWith)
+    if (topic.indexOf(topicPrefix) === 0) {
       let relativeTopic = topic.substring(topicPrefix.length);
       
       // Special handling for full_publish_completed
