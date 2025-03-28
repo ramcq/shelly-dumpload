@@ -235,12 +235,18 @@ function setupEventHandlers() {
   
   // Watch for switch events
   Shelly.addEventHandler(function(event) {
+    logDebug("Event received: " + JSON.stringify(event));
+    
+    // Make sure event has the necessary properties before checking them
+    if (!event || !event.name || !event.info || !event.info.event)
+      return;
+
     if (event.name === "switch" && event.info.event === "toggle") {
       logDebug("Switch toggle event detected");
       updateRelayState();
     }
     
-    if (event.name === "input" && event.info.startsWith("toggle")) {
+    if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
       logDebug("Input toggle event detected");
       updateInputState();
     }
