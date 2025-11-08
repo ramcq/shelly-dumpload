@@ -14,10 +14,11 @@ let config = {
     reconnectDelay: 5000
   },
 
-  // Relays to monitor for dump load active status
-  // Monitor these for: output ON + voltage present + no consumption
-  monitoredRelays: [
-    // Dump load relays (Shelly Plus 1PM)
+  // Dump load devices to monitor (6 switches total)
+  // All of these are dump loads - monitors for: output ON + voltage present + no consumption
+  // When ANY of these is active (dumping power), thermal dump can operate
+  dumpLoads: [
+    // Shelly Plus 1PM dump loads (3 devices, 1 switch each)
     {
       name: "Dump Load 1",
       statusTopic: "shellies/shellyplus1pm-XXXXXX/status/switch:0" // Replace XXXXXX with device ID
@@ -30,7 +31,7 @@ let config = {
       name: "Dump Load 3",
       statusTopic: "shellies/shellyplus1pm-ZZZZZZ/status/switch:0" // Replace ZZZZZZ with device ID
     },
-    // Shelly Pro 2PM (ec6260a03d70) - has 2 switches
+    // Shelly Pro 2PM dump load (ec6260a03d70) - 2 switches
     {
       name: "Pro 2PM Switch 0",
       statusTopic: "shellies/shellypro2pm-ec6260a03d70/status/switch:0"
@@ -39,7 +40,7 @@ let config = {
       name: "Pro 2PM Switch 1",
       statusTopic: "shellies/shellypro2pm-ec6260a03d70/status/switch:1"
     },
-    // Shelly Pro Dimmer 0/1-10V PM (8813bfe0e128) - has 1 switch
+    // Shelly Pro Dimmer 0/1-10V PM dump load (8813bfe0e128) - 1 switch
     {
       name: "Pro Dimmer",
       statusTopic: "shellies/shellyprodimmer0110v-8813bfe0e128/status/switch:0"
@@ -95,8 +96,8 @@ let state = {
   fanCoilOnTime: 0,
   pumpOnTime: 0,
 
-  // Monitored relay states
-  monitoredRelays: [],
+  // Dump load states
+  dumpLoads: [],
 
   // Temperature data
   topTankTemp: 0,
@@ -128,10 +129,10 @@ function arrayContains(array, value) {
   return false;
 }
 
-// Check if any monitored relay is active
-function isAnyRelayActive() {
-  for (let i = 0; i < state.monitoredRelays.length; i++) {
-    let relay = state.monitoredRelays[i];
+// Check if any dump load is active
+function isDumpLoadActive() {
+  for (let i = 0; i < state.dumpLoads.length; i++) {
+    let relay = state.dumpLoads[i];
     if (relay.output &&
         relay.voltage >= config.thresholds.minVoltage &&
         relay.power <= config.thresholds.maxConsumption) {
@@ -152,12 +153,12 @@ function updateStatus(event) {
   let deltaPart = " (Δ" + tempDelta.toFixed(1) + "°C)";
   let boilerPart = ", Boiler " + (state.boilerOperating ? "ON" : "OFF");
 
-  let anyRelayActive = isAnyRelayActive();
-  let relayPart = ", Relays " + (anyRelayActive ? "ACTIVE" : "inactive");
+  let dumpLoadActive = isDumpLoadActive();
+  let dumpPart = ", Dump " + (dumpLoadActive ? "ACTIVE" : "inactive");
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = frostPart + fanPart + pumpPart + tempPart + deltaPart + boilerPart + relayPart + eventPart;
+  let statusMessage = frostPart + fanPart + pumpPart + tempPart + deltaPart + boilerPart + dumpPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -229,9 +230,9 @@ function finishSetup() {
     console.log("Error getting component handles: " + e.message);
   }
 
-  // Initialize monitored relay state array
-  for (let i = 0; i < config.monitoredRelays.length; i++) {
-    state.monitoredRelays.push({ output: false, voltage: 0, power: 0 });
+  // Initialize dump load state array
+  for (let i = 0; i < config.dumpLoads.length; i++) {
+    state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
   }
 
   // Set up event handlers
@@ -250,7 +251,7 @@ function finishSetup() {
   console.log("Min Voltage: " + config.thresholds.minVoltage + "V");
   console.log("Max Consumption: " + config.thresholds.maxConsumption + "W");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
-  console.log("Monitoring " + config.monitoredRelays.length + " relays");
+  console.log("Monitoring " + config.dumpLoads.length + " dump load switches (6 total)");
   console.log("==============================================");
 
   updateStatus("Monitoring started");
@@ -294,21 +295,21 @@ function processMqttMessage(topic, message) {
   try {
     let payload = JSON.parse(message);
 
-    // Check if this is a monitored relay status message
-    for (let i = 0; i < config.monitoredRelays.length; i++) {
-      if (topic === config.monitoredRelays[i].statusTopic) {
+    // Check if this is a dump load status message
+    for (let i = 0; i < config.dumpLoads.length; i++) {
+      if (topic === config.dumpLoads[i].statusTopic) {
         if (payload.output !== undefined) {
-          state.monitoredRelays[i].output = Boolean(payload.output);
+          state.dumpLoads[i].output = Boolean(payload.output);
         }
         if (payload.voltage !== undefined) {
-          state.monitoredRelays[i].voltage = parseFloat(payload.voltage);
+          state.dumpLoads[i].voltage = parseFloat(payload.voltage);
         }
         if (payload.apower !== undefined) {
-          state.monitoredRelays[i].power = parseFloat(payload.apower);
+          state.dumpLoads[i].power = parseFloat(payload.apower);
         }
-        logDebug(config.monitoredRelays[i].name + ": output=" + state.monitoredRelays[i].output +
-                ", voltage=" + state.monitoredRelays[i].voltage + "V" +
-                ", power=" + state.monitoredRelays[i].power + "W");
+        logDebug(config.dumpLoads[i].name + ": output=" + state.dumpLoads[i].output +
+                ", voltage=" + state.dumpLoads[i].voltage + "V" +
+                ", power=" + state.dumpLoads[i].power + "W");
         return;
       }
     }
@@ -359,10 +360,10 @@ function handleMqttConnected() {
     logDebug("Subscribed to: " + topic);
   }
 
-  // Subscribe to monitored relay topics
-  for (let i = 0; i < config.monitoredRelays.length; i++) {
-    MQTT.subscribe(config.monitoredRelays[i].statusTopic, processMqttMessage);
-    logDebug("Subscribed to: " + config.monitoredRelays[i].statusTopic);
+  // Subscribe to dump load topics
+  for (let i = 0; i < config.dumpLoads.length; i++) {
+    MQTT.subscribe(config.dumpLoads[i].statusTopic, processMqttMessage);
+    logDebug("Subscribed to: " + config.dumpLoads[i].statusTopic);
   }
 
   // Send initial keepalive
@@ -397,10 +398,10 @@ function sendKeepalive(suppressRepublish) {
 }
 
 function resetMqttData() {
-  for (let i = 0; i < state.monitoredRelays.length; i++) {
-    state.monitoredRelays[i].output = false;
-    state.monitoredRelays[i].voltage = 0;
-    state.monitoredRelays[i].power = 0;
+  for (let i = 0; i < state.dumpLoads.length; i++) {
+    state.dumpLoads[i].output = false;
+    state.dumpLoads[i].voltage = 0;
+    state.dumpLoads[i].power = 0;
   }
   state.topTankTemp = 0;
   state.bottomTankTemp = 0;
@@ -632,27 +633,27 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 2: Check if any monitored relay is active
-  let anyRelayActive = isAnyRelayActive();
+  // PRIORITY 2: Check if any dump load is active
+  let dumpLoadActive = isDumpLoadActive();
 
-  if (!anyRelayActive) {
-    // No relay active - turn off both outputs
+  if (!dumpLoadActive) {
+    // No dump load active - turn off both outputs
     if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "No relay active");
+      turnOutputOff(OUTPUT_PUMP, "Pump", "No dump load active");
     }
     if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "No relay active");
+      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "No dump load active");
     }
     return;
   }
 
-  // At least one relay is active - check conditions for pump and fan coil
+  // At least one dump load is active - check conditions for pump and fan coil
 
   // PUMP LOGIC: Turn on if tank temp > minTankTemp AND boiler not operating
   let pumpConditionMet = (state.topTankTemp > config.thresholds.minTankTemp && !state.boilerOperating);
 
   if (pumpConditionMet && !state.pumpOn) {
-    turnOutputOn(OUTPUT_PUMP, "Pump", "Tank hot (" + state.topTankTemp.toFixed(1) + "°C), boiler off, relay active");
+    turnOutputOn(OUTPUT_PUMP, "Pump", "Tank hot (" + state.topTankTemp.toFixed(1) + "°C), boiler off, dump load active");
   } else if (!pumpConditionMet && state.pumpOn) {
     let reason = "Conditions not met: ";
     if (state.topTankTemp <= config.thresholds.minTankTemp) {
@@ -668,7 +669,7 @@ function checkSystemState() {
   let fanConditionMet = pumpConditionMet && (tempDelta <= config.thresholds.maxTempDelta);
 
   if (fanConditionMet && !state.fanCoilOn) {
-    turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "Tank hot, low delta (" + tempDelta.toFixed(1) + "°C), relay active");
+    turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "Tank hot, low delta (" + tempDelta.toFixed(1) + "°C), dump load active");
   } else if (!fanConditionMet && state.fanCoilOn) {
     let reason = "Conditions not met: ";
     if (!pumpConditionMet) {
