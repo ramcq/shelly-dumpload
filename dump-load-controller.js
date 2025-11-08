@@ -12,11 +12,9 @@ let config = {
     reconnectDelay: 5000 // ms to wait before reconnection attempt
   },
 
-  // Lead relay monitoring (for manual time switch coordination)
+  // Lead relay (has manual time switch connected to its input)
   leadRelay: {
-    enabled: true, // Set to false to disable lead relay monitoring
-    topic: "shellies/shellyplus1pm-XXXXXX/status/input:0" // Replace XXXXXX with lead relay device ID
-    // The lead relay has a manual time switch connected to its input
+    deviceId: "543204558fc8", // Device ID of the lead relay
     // When the lead input is ON, all dump load relays should turn on
   },
 
@@ -36,14 +34,11 @@ let config = {
     acSource: "system/0/Ac/ActiveIn/Source" // 0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected
   },
 
-  // Virtual component IDs
+  // Virtual component IDs (minimal set)
   virtualComponents: {
     highSocThreshold: 200,
-    batterySoc: 210,         // Battery SOC from Victron
-    acConnected: 211,        // AC input status from Victron
-    leadInputActive: 212,    // Lead relay input status
-    status: 213,
-    group: 214
+    status: 201,
+    group: 202
   },
 
   // Debug mode
@@ -57,18 +52,21 @@ let state = {
   keepaliveTimer: null,
   reconnectTimer: null,
 
+  // Device identity
+  isLeadRelay: false,        // True if this device is the lead relay
+  leadRelayTopic: "",        // MQTT topic to monitor for lead relay input
+
   // Relay control state
-  lastSwitchedOnTime: 0,      // When we last turned the relay on
-  scriptControlledOn: false,  // Flag to track if WE turned it on
-  relayIsOn: false,           // Current relay state
-  inputIsActive: false,       // State of the local input
+  lastSwitchedOnTime: 0,     // When we last turned the relay on
+  relayIsOn: false,          // Current relay state
+  inputIsActive: false,      // State of the local input
 
   // Victron data
-  currentSoc: 0,              // Current SOC from Victron
-  acInputConnected: false,    // Current AC input status from Victron
+  currentSoc: 0,             // Current SOC from Victron
+  acInputConnected: false,   // Current AC input status from Victron
 
   // Lead relay state
-  leadInputActive: false,     // State of the lead relay's input (manual time switch)
+  leadInputActive: false,    // State of the lead relay's input (manual time switch)
 
   // Control settings
   highSocThreshold: config.soc.highThreshold,
@@ -81,9 +79,6 @@ let state = {
 // ===== Virtual component handles =====
 let handles = {
   highSocThreshold: null,
-  batterySoc: null,
-  acConnected: null,
-  leadInputActive: null,
   status: null
 };
 
@@ -109,15 +104,14 @@ function updateStatus(event) {
   let thresholdInfo = " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
 
   let relayPart = state.relayIsOn ? "Relay ON" : "Relay OFF";
-  let controlPart = state.relayIsOn ? (state.scriptControlledOn ? " (script)" : " (external)") : "";
 
   let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
-  let leadPart = config.leadRelay.enabled ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
+  let leadPart = !state.isLeadRelay ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
   let acPart = ", AC-In " + (state.acInputConnected ? "ON" : "OFF");
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = socPart + thresholdInfo + ", " + relayPart + controlPart + inputPart + leadPart + acPart + eventPart;
+  let statusMessage = socPart + thresholdInfo + ", " + relayPart + inputPart + leadPart + acPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -159,74 +153,6 @@ function setupVirtualComponents(existingComponentKeys) {
     logDebug("High SOC threshold component exists");
   }
 
-  // Battery SOC display (read-only)
-  if (!arrayContains(existingComponentKeys, "number:" + compId.batterySoc)) {
-    console.log("Creating battery SOC component");
-    Shelly.call("Virtual.Add", {
-      type: "number",
-      id: compId.batterySoc,
-      config: {
-        name: "Battery SOC",
-        default_value: 0,
-        min: 0,
-        max: 100,
-        meta: {
-          ui: {
-            view: "label",
-            unit: "%"
-          }
-        },
-        persisted: false
-      }
-    });
-  } else {
-    logDebug("Battery SOC component exists");
-  }
-
-  // AC Connected display (read-only)
-  if (!arrayContains(existingComponentKeys, "boolean:" + compId.acConnected)) {
-    console.log("Creating AC connected component");
-    Shelly.call("Virtual.Add", {
-      type: "boolean",
-      id: compId.acConnected,
-      config: {
-        name: "AC Input Connected",
-        default_value: false,
-        persisted: false,
-        meta: {
-          ui: {
-            view: "label"
-          }
-        }
-      }
-    });
-  } else {
-    logDebug("AC connected component exists");
-  }
-
-  // Lead input status display (read-only)
-  if (config.leadRelay.enabled) {
-    if (!arrayContains(existingComponentKeys, "boolean:" + compId.leadInputActive)) {
-      console.log("Creating lead input status component");
-      Shelly.call("Virtual.Add", {
-        type: "boolean",
-        id: compId.leadInputActive,
-        config: {
-          name: "Lead Input Active",
-          default_value: false,
-          persisted: false,
-          meta: {
-            ui: {
-              view: "label"
-            }
-          }
-        }
-      });
-    } else {
-      logDebug("Lead input component exists");
-    }
-  }
-
   // Status display
   if (!arrayContains(existingComponentKeys, "text:" + compId.status)) {
     console.log("Creating status component");
@@ -250,25 +176,15 @@ function setupVirtualComponents(existingComponentKeys) {
   // Group component
   if (!arrayContains(existingComponentKeys, "group:" + compId.group)) {
     console.log("Creating group component");
-
-    let components = [
-      "number:" + compId.highSocThreshold,
-      "number:" + compId.batterySoc,
-      "boolean:" + compId.acConnected
-    ];
-
-    if (config.leadRelay.enabled) {
-      components.push("boolean:" + compId.leadInputActive);
-    }
-
-    components.push("text:" + compId.status);
-
     Shelly.call("Virtual.Add", {
       type: "group",
       id: compId.group,
       config: {
         name: "Dump Load Controller",
-        components: components
+        components: [
+          "number:" + compId.highSocThreshold,
+          "text:" + compId.status
+        ]
       }
     });
   } else {
@@ -289,13 +205,7 @@ function finishSetup() {
   // Get component handles
   try {
     handles.highSocThreshold = Virtual.getHandle("number:" + compId.highSocThreshold);
-    handles.batterySoc = Virtual.getHandle("number:" + compId.batterySoc);
-    handles.acConnected = Virtual.getHandle("boolean:" + compId.acConnected);
     handles.status = Virtual.getHandle("text:" + compId.status);
-
-    if (config.leadRelay.enabled) {
-      handles.leadInputActive = Virtual.getHandle("boolean:" + compId.leadInputActive);
-    }
 
     // Load high threshold value
     if (handles.highSocThreshold && handles.highSocThreshold.getValue() !== undefined) {
@@ -303,20 +213,12 @@ function finishSetup() {
       state.lowSocThreshold = state.highSocThreshold - 1; // Auto-calculate
       logDebug("Loaded high SOC threshold: " + state.highSocThreshold + "% (low: " + state.lowSocThreshold + "%)");
     }
-
-    // Set initial values
-    if (handles.batterySoc) {
-      handles.batterySoc.setValue(0);
-    }
-    if (handles.acConnected) {
-      handles.acConnected.setValue(false);
-    }
-    if (handles.leadInputActive) {
-      handles.leadInputActive.setValue(false);
-    }
   } catch (e) {
     console.log("Error getting component handles: " + e.message);
   }
+
+  // Determine device identity
+  determineDeviceIdentity();
 
   // Set up event handlers
   setupEventHandlers();
@@ -328,14 +230,49 @@ function finishSetup() {
   startMonitoring();
 
   console.log("=== Dump Load Controller Configuration ===");
+  console.log("Device is lead relay: " + state.isLeadRelay);
   console.log("High SOC Threshold: " + state.highSocThreshold + "%");
   console.log("Low SOC Threshold: " + state.lowSocThreshold + "% (auto-calculated)");
   console.log("Minimum On Time: " + (config.minOnTime / (60 * 1000)) + " minutes");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
-  console.log("Lead Relay Monitoring: " + (config.leadRelay.enabled ? "Enabled" : "Disabled"));
+  if (!state.isLeadRelay) {
+    console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
+  }
   console.log("==========================================");
 
   updateStatus("Monitoring started");
+}
+
+// Determine if this device is the lead relay
+function determineDeviceIdentity() {
+  Shelly.call(
+    "Shelly.GetDeviceInfo",
+    {},
+    function(result, error_code, error_message) {
+      if (error_code !== 0 || !result || !result.mac) {
+        console.log("Error getting device info: " + error_message);
+        // Assume we're not the lead relay
+        state.isLeadRelay = false;
+        state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
+        return;
+      }
+
+      // Extract device ID from MAC (last 12 hex chars without colons)
+      let mac = result.mac;
+      let deviceId = mac.replace(/:/g, "").toLowerCase();
+
+      logDebug("Device MAC: " + mac + ", Device ID: " + deviceId);
+
+      if (deviceId === config.leadRelay.deviceId) {
+        state.isLeadRelay = true;
+        console.log("This device IS the lead relay - will use local input");
+      } else {
+        state.isLeadRelay = false;
+        state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
+        console.log("This device is NOT the lead relay - will monitor: " + state.leadRelayTopic);
+      }
+    }
+  );
 }
 
 // ===== Event handlers =====
@@ -355,7 +292,7 @@ function setupEventHandlers() {
     }
   }
 
-  // Watch for switch events
+  // Watch for switch and input events
   Shelly.addEventHandler(function(event) {
     logDebug("Event received: " + JSON.stringify(event));
 
@@ -365,11 +302,13 @@ function setupEventHandlers() {
     if (event.name === "switch" && event.info.event === "toggle") {
       logDebug("Switch toggle event detected");
       updateRelayState();
+      checkSystemState(); // Immediately check state
     }
 
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
       logDebug("Input toggle event detected");
       updateInputState();
+      checkSystemState(); // Immediately check state
     }
   });
 }
@@ -382,18 +321,15 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  logDebug("MQTT message: " + topic + " = " + message);
+  logDebug("MQTT message: " + topic);
 
   try {
-    // Handle lead relay input status
-    if (config.leadRelay.enabled && topic === config.leadRelay.topic) {
+    // Handle lead relay input status (only if we're NOT the lead relay)
+    if (!state.isLeadRelay && state.leadRelayTopic && topic === state.leadRelayTopic) {
       let payload = JSON.parse(message);
       if (payload.state !== undefined) {
         state.leadInputActive = Boolean(payload.state);
-        if (handles.leadInputActive) {
-          handles.leadInputActive.setValue(state.leadInputActive);
-        }
-        logDebug("Lead input updated: " + state.leadInputActive);
+        logDebug("Lead input updated via MQTT: " + state.leadInputActive);
         updateStatus("Lead input changed");
 
         // Immediately check system state when lead input changes
@@ -418,9 +354,6 @@ function processMqttMessage(topic, message) {
     // Update battery SOC
     if (relativeTopic === config.topics.batterySOC) {
       state.currentSoc = parseFloat(payload.value);
-      if (handles.batterySoc) {
-        handles.batterySoc.setValue(state.currentSoc);
-      }
       logDebug("Battery SOC updated: " + state.currentSoc + "%");
     }
 
@@ -428,9 +361,6 @@ function processMqttMessage(topic, message) {
     if (relativeTopic === config.topics.acSource) {
       // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore; 240=Not connected
       state.acInputConnected = (payload.value !== 240);
-      if (handles.acConnected) {
-        handles.acConnected.setValue(state.acInputConnected);
-      }
       logDebug("AC connected updated: " + state.acInputConnected);
     }
   } catch (e) {
@@ -450,10 +380,10 @@ function handleMqttConnected() {
     logDebug("Subscribed to: " + topic);
   }
 
-  // Subscribe to lead relay input topic
-  if (config.leadRelay.enabled) {
-    MQTT.subscribe(config.leadRelay.topic, processMqttMessage);
-    logDebug("Subscribed to lead relay: " + config.leadRelay.topic);
+  // Subscribe to lead relay input topic (only if we're NOT the lead relay)
+  if (!state.isLeadRelay && state.leadRelayTopic) {
+    MQTT.subscribe(state.leadRelayTopic, processMqttMessage);
+    logDebug("Subscribed to lead relay: " + state.leadRelayTopic);
   }
 
   // Send initial keepalive
@@ -490,16 +420,8 @@ function sendKeepalive(suppressRepublish) {
 function resetMqttData() {
   state.currentSoc = 0;
   state.acInputConnected = false;
-  state.leadInputActive = false;
-
-  if (handles.batterySoc) {
-    handles.batterySoc.setValue(0);
-  }
-  if (handles.acConnected) {
-    handles.acConnected.setValue(false);
-  }
-  if (handles.leadInputActive) {
-    handles.leadInputActive.setValue(false);
+  if (!state.isLeadRelay) {
+    state.leadInputActive = false;
   }
 
   logDebug("Reset MQTT data due to disconnection");
@@ -608,11 +530,6 @@ function updateRelayState() {
         return;
 
       state.relayIsOn = result.output;
-
-      if (!state.relayIsOn) {
-        state.scriptControlledOn = false;
-      }
-
       updateStatus("Relay state updated");
     }
   );
@@ -637,6 +554,13 @@ function updateInputState() {
         return;
 
       state.inputIsActive = result.state;
+
+      // If we're the lead relay, local input represents the manual time switch
+      if (state.isLeadRelay) {
+        state.leadInputActive = state.inputIsActive;
+        logDebug("Lead input updated from local input: " + state.leadInputActive);
+      }
+
       updateStatus("Input state updated");
     }
   );
@@ -655,7 +579,6 @@ function turnRelayOn(reason) {
         return;
       }
 
-      state.scriptControlledOn = true;
       state.relayIsOn = true;
       state.lastSwitchedOnTime = Date.now();
       updateStatus(reason);
@@ -664,20 +587,6 @@ function turnRelayOn(reason) {
 }
 
 function turnRelayOff(reason) {
-  // Only turn off if we previously turned it on
-  if (!state.scriptControlledOn) {
-    logDebug("Not turning relay off - not under script control");
-    return;
-  }
-
-  // Don't turn off if the input is active
-  if (state.inputIsActive) {
-    logDebug("Not turning relay off - input is active");
-    state.scriptControlledOn = false;
-    updateStatus("Input active - relinquishing control");
-    return;
-  }
-
   logDebug("Attempting to turn relay OFF: " + reason);
 
   Shelly.call(
@@ -689,7 +598,6 @@ function turnRelayOff(reason) {
         return;
       }
 
-      state.scriptControlledOn = false;
       state.relayIsOn = false;
       updateStatus(reason);
     }
@@ -699,19 +607,27 @@ function turnRelayOff(reason) {
 function checkSystemState() {
   updateStatus("Monitoring");
 
-  // PRIORITY 1: Lead relay input (manual time switch)
-  // If lead input is active, turn on relay unconditionally
-  if (config.leadRelay.enabled && state.leadInputActive) {
+  // PRIORITY 1: Local input (for the lead relay, this is the manual time switch)
+  // For non-lead relays, local input can still manually override
+  if (state.inputIsActive) {
+    if (!state.relayIsOn) {
+      turnRelayOn("Local input active" + (state.isLeadRelay ? " (manual time switch)" : ""));
+    }
+    return; // Skip other checks when local input is active
+  }
+
+  // PRIORITY 2: Lead relay input (manual time switch) - only for non-lead relays
+  if (!state.isLeadRelay && state.leadInputActive) {
     if (!state.relayIsOn) {
       turnRelayOn("Lead relay input active (manual time switch ON)");
     }
     return; // Skip other checks
   }
 
-  // PRIORITY 2: AC input check
+  // PRIORITY 3: AC input check
   // If AC input is connected, turn off dump load
   if (state.acInputConnected) {
-    if (state.relayIsOn && state.scriptControlledOn) {
+    if (state.relayIsOn) {
       turnRelayOff("AC input connected");
     } else {
       logDebug("AC input connected - no control action");
@@ -719,7 +635,7 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 3: SOC-based control
+  // PRIORITY 4: SOC-based control
   if (state.currentSoc <= 0) {
     logDebug("No SOC data available - no action taken");
     return;
@@ -735,7 +651,7 @@ function checkSystemState() {
     turnRelayOn("SOC high: " + state.currentSoc + "% >= " + state.highSocThreshold + "%");
   }
   // Turn off when SOC reaches low threshold (and minimum on time elapsed)
-  else if (state.currentSoc <= state.lowSocThreshold && state.relayIsOn && state.scriptControlledOn && timeElapsed >= config.minOnTime) {
+  else if (state.currentSoc <= state.lowSocThreshold && state.relayIsOn && timeElapsed >= config.minOnTime) {
     turnRelayOff("SOC low: " + state.currentSoc + "% <= " + state.lowSocThreshold + "%");
   }
 }
@@ -793,15 +709,9 @@ function initializeVirtualComponents() {
   let compId = config.virtualComponents;
   let keys = [
     "number:" + compId.highSocThreshold,
-    "number:" + compId.batterySoc,
-    "boolean:" + compId.acConnected,
     "text:" + compId.status,
     "group:" + compId.group
   ];
-
-  if (config.leadRelay.enabled) {
-    keys.push("boolean:" + compId.leadInputActive);
-  }
 
   Shelly.call(
     "Shelly.GetComponents",
