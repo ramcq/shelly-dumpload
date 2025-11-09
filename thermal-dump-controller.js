@@ -14,23 +14,10 @@ let config = {
     reconnectDelay: 5000
   },
 
-  // Dump load devices to monitor (6 switches total)
+  // Dump load devices to monitor (3 switches total)
   // All of these are dump loads - monitors for: output ON + voltage present + no consumption
   // When ANY of these is active (dumping power), thermal dump can operate
   dumpLoads: [
-    // Shelly Plus 1PM dump loads (3 devices, 1 switch each)
-    {
-      name: "Dump Load 1",
-      statusTopic: "shellies/shellyplus1pm-XXXXXX/status/switch:0" // Replace XXXXXX with device ID
-    },
-    {
-      name: "Dump Load 2",
-      statusTopic: "shellies/shellyplus1pm-YYYYYY/status/switch:0" // Replace YYYYYY with device ID
-    },
-    {
-      name: "Dump Load 3",
-      statusTopic: "shellies/shellyplus1pm-ZZZZZZ/status/switch:0" // Replace ZZZZZZ with device ID
-    },
     // Shelly Pro 2PM dump load (ec6260a03d70) - 2 switches
     {
       name: "Pro 2PM Switch 0",
@@ -57,9 +44,9 @@ let config = {
 
   // Victron topics for tank temperatures and boiler status
   topics: {
-    topTankTemp: "system/0/Dc/Tank/Temperature/Top",    // Adjust based on actual Victron setup
-    bottomTankTemp: "system/0/Dc/Tank/Temperature/Bottom", // Adjust based on actual Victron setup
-    boilerOperating: "system/0/Dc/Relay/0/State"        // Adjust based on actual boiler relay
+    topTankTemp: "temperature/100/Temperature",      // Top tank temperature sensor
+    bottomTankTemp: "temperature/101/Temperature",   // Bottom tank temperature sensor
+    boilerOperating: "digitalinput/102/State"        // Boiler digital input (10=running, 11=stopped)
   },
 
   // Timing settings
@@ -251,7 +238,7 @@ function finishSetup() {
   console.log("Min Voltage: " + config.thresholds.minVoltage + "V");
   console.log("Max Consumption: " + config.thresholds.maxConsumption + "W");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
-  console.log("Monitoring " + config.dumpLoads.length + " dump load switches (6 total)");
+  console.log("Monitoring " + config.dumpLoads.length + " dump load switches (Pro 2PM x2, Pro Dimmer x1)");
   console.log("==============================================");
 
   updateStatus("Monitoring started");
@@ -338,10 +325,10 @@ function processMqttMessage(topic, message) {
       logDebug("Bottom tank temp updated: " + state.bottomTankTemp + "°C");
     }
 
-    // Update boiler operating status
+    // Update boiler operating status (10=running, 11=stopped)
     if (relativeTopic === config.topics.boilerOperating) {
-      state.boilerOperating = Boolean(payload.value);
-      logDebug("Boiler operating updated: " + state.boilerOperating);
+      state.boilerOperating = (payload.value === 10);
+      logDebug("Boiler operating updated: " + state.boilerOperating + " (state=" + payload.value + ")");
     }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
