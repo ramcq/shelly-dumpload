@@ -658,15 +658,6 @@ function checkSystemState() {
   return;
 }
 
-function checkStatus() {
-  // Update input and output states
-  updateInputState();
-  updateOutputStates();
-
-  // Check if action needed
-  checkSystemState();
-}
-
 function startMonitoring() {
   logDebug("Starting monitoring with interval: " + (config.checkInterval / 1000) + " seconds");
 
@@ -678,12 +669,11 @@ function startMonitoring() {
 
   // Start new timer
   state.timerId = Timer.set(config.checkInterval, true, function() {
-    logDebug("Timer triggered check");
-    checkStatus();
+    checkSystemState();
   });
 
   // Initial check immediately
-  checkStatus();
+  checkSystemState();
 }
 
 // ===== Initialization =====
