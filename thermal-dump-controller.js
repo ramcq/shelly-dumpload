@@ -232,22 +232,24 @@ function setupEventHandlers() {
 
   // Watch for input and switch events
   Shelly.addEventHandler(function(event) {
-    logDebug("Event received: " + JSON.stringify(event));
-
     if (!event || !event.name || !event.info || !event.info.event)
       return;
+
+    if (event.info.event == "power_measurement" ||
+        event.info.event == "power_update" ||
+        event.info.event == "current_update" ||
+        event.info.event == "pf_update" ||
+        event.info.event == "ret_aenergy_update" ||
+        event.info.event == "aenergy_update")
+      return;
+
+    logDebug("Event received: " + JSON.stringify(event));
 
     // Input toggle (frost thermostat)
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
       logDebug("Input toggle event detected");
       updateInputState();
       checkSystemState(); // Immediately check state
-    }
-
-    // Switch toggle (outputs)
-    if (event.name === "switch") {
-      logDebug("Switch event detected");
-      updateOutputStates();
     }
   });
 }
