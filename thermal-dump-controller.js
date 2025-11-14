@@ -55,8 +55,7 @@ let config = {
 
   // Virtual component IDs (minimal set)
   virtualComponents: {
-    status: 200,
-    group: 201
+    status: 200
   },
 
   // Debug mode
@@ -180,23 +179,6 @@ function setupVirtualComponents(existingComponentKeys) {
     });
   } else {
     logDebug("Status component exists");
-  }
-
-  // Group component
-  if (!arrayContains(existingComponentKeys, "group:" + compId.group)) {
-    console.log("Creating group component");
-    Shelly.call("Virtual.Add", {
-      type: "group",
-      id: compId.group,
-      config: {
-        name: "Thermal Dump Controller",
-        components: [
-          "text:" + compId.status
-        ]
-      }
-    });
-  } else {
-    logDebug("Group component exists");
   }
 
   // Wait for components to initialize
@@ -708,8 +690,7 @@ function initializeVirtualComponents() {
 
   let compId = config.virtualComponents;
   let keys = [
-    "text:" + compId.status,
-    "group:" + compId.group
+    "text:" + compId.status
   ];
 
   Shelly.call(
