@@ -16,21 +16,21 @@ let config = {
 
   // Dump load devices to monitor (3 switches total)
   // All of these are dump loads - monitors for: output ON + voltage present + no consumption
-  // When ANY of these is active (dumping power), thermal dump can operate
+  // When ANY of these is at thermal cut-out (voltage but no power), thermal dump can operate
   dumpLoads: [
     // Shelly Pro 2PM dump load (ec6260a03d70) - 2 switches
     {
       name: "Pro 2PM Switch 0",
-      statusTopic: "shellies/shellypro2pm-ec6260a03d70/status/switch:0"
+      statusTopic: "shellypro2pm-ec6260a03d70/status/switch:0"
     },
     {
       name: "Pro 2PM Switch 1",
-      statusTopic: "shellies/shellypro2pm-ec6260a03d70/status/switch:1"
+      statusTopic: "shellypro2pm-ec6260a03d70/status/switch:1"
     },
-    // Shelly Pro Dimmer 0/1-10V PM dump load (8813bfe0e128) - 1 switch
+    // Shelly Pro Dimmer 0/1-10V PM dump load (8813bfe0e128) - 1 "light"
     {
-      name: "Pro Dimmer",
-      statusTopic: "shellies/shellyprodimmer0110v-8813bfe0e128/status/switch:0"
+      name: "Pro 0-10V PM Dimmer",
+      statusTopic: "shellypro0110pm-8813bfe0e128/status/light:0"
     }
   ],
 
@@ -117,7 +117,7 @@ function arrayContains(array, value) {
 }
 
 // Check if any dump load is active
-function isDumpLoadActive() {
+function isThermalDumpNeeded() {
   for (let i = 0; i < state.dumpLoads.length; i++) {
     let relay = state.dumpLoads[i];
     if (relay.output &&
@@ -140,8 +140,8 @@ function updateStatus(event) {
   let deltaPart = " (Δ" + tempDelta.toFixed(1) + "°C)";
   let boilerPart = ", Boiler " + (state.boilerOperating ? "ON" : "OFF");
 
-  let dumpLoadActive = isDumpLoadActive();
-  let dumpPart = ", Dump " + (dumpLoadActive ? "ACTIVE" : "inactive");
+  let thermalDumpNeeded = isThermalDumpNeeded();
+  let dumpPart = ", Thermal Dump " + (thermalDumpNeeded ? "NEEDED" : "not needed");
 
   let eventPart = event ? ": " + event : "";
 
@@ -620,52 +620,58 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 2: Check if any dump load is active
-  let dumpLoadActive = isDumpLoadActive();
-
-  if (!dumpLoadActive) {
-    // No dump load active - turn off both outputs
-    if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "No dump load active");
-    }
+  // PRIORITY 2: Stop if boiler is operating
+  if (state.boilerOperating) {
     if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "No dump load active");
+      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Boiler Operating");
+    }
+    if (state.pumpOn) {
+      turnOutputOff(OUTPUT_PUMP, "Pump", "Boiler Operating");
+    }
+    return; // Skip other checks
+  }
+
+  // PRIORITY 3: Stop if tank is not hot
+  if (state.topTankTemp < config.thresholds.minTankTemp) {
+    if (state.fanCoilOn) {
+      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Tank Below Temperature");
+    }
+    if (state.pumpOn) {
+      turnOutputOff(OUTPUT_PUMP, "Pump", "Tank Below Temperature");
     }
     return;
   }
 
-  // At least one dump load is active - check conditions for pump and fan coil
+  // PRIORITY 4: Check if any thermal dump is needed (dump load is powered but inactive)
+  let thermalDumpNeeded = isThermalDumpNeeded();
 
-  // PUMP LOGIC: Turn on if tank temp > minTankTemp AND boiler not operating
-  let pumpConditionMet = (state.topTankTemp > config.thresholds.minTankTemp && !state.boilerOperating);
-
-  if (pumpConditionMet && !state.pumpOn) {
-    turnOutputOn(OUTPUT_PUMP, "Pump", "Tank hot (" + state.topTankTemp.toFixed(1) + "°C), boiler off, dump load active");
-  } else if (!pumpConditionMet && state.pumpOn) {
-    let reason = "Conditions not met: ";
-    if (state.topTankTemp <= config.thresholds.minTankTemp) {
-      reason += "tank too cold (" + state.topTankTemp.toFixed(1) + "°C)";
-    } else if (state.boilerOperating) {
-      reason += "boiler operating";
+  if (!thermalDumpNeeded) {
+    if (state.fanCoilOn) {
+      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Tank Still Heating");
     }
-    turnOutputOff(OUTPUT_PUMP, "Pump", reason);
+    if (state.pumpOn) {
+      turnOutputOff(OUTPUT_PUMP, "Pump", "Tank Still Heating");
+    }
+    return;
   }
 
-  // FAN COIL LOGIC: Turn on if pump conditions met AND temp delta is low
+  // PUMP LOGIC: At least one dump load is cut-out, stir the tank
+  if (!state.pumpOn) {
+    turnOutputOn(OUTPUT_PUMP, "Pump", "Tank hot (" + state.topTankTemp.toFixed(1) + "°C), boiler off, thermal dump needed");
+  }
+
+  // FAN COIL LOGIC: Turn on if temp delta is low
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
-  let fanConditionMet = pumpConditionMet && (tempDelta <= config.thresholds.maxTempDelta);
 
-  if (fanConditionMet && !state.fanCoilOn) {
-    turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "Tank hot, low delta (" + tempDelta.toFixed(1) + "°C), dump load active");
-  } else if (!fanConditionMet && state.fanCoilOn) {
-    let reason = "Conditions not met: ";
-    if (!pumpConditionMet) {
-      reason += "pump conditions not met";
-    } else if (tempDelta > config.thresholds.maxTempDelta) {
-      reason += "temp delta too high (" + tempDelta.toFixed(1) + "°C)";
+  if (tempDelta <= config.thresholds.maxTempDelta) {
+    if (!state.fanCoilOn) {
+      turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "Tank hot, low delta (" + tempDelta.toFixed(1) + "°C), thermal dump needed");
     }
-    turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", reason);
+  } else if (state.fanCoilOn) {
+    turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Tank hot, high delta (" + tempDelta.toFixed(1) + "°C), thermal dump needed");
   }
+
+  return;
 }
 
 function checkStatus() {
