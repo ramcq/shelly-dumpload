@@ -92,7 +92,8 @@ let state = {
   boilerOperating: false,
 
   // Timer
-  timerId: null
+  timerId: null,
+  checkInProgress: false  // Prevent overlapping checks
 };
 
 // ===== Virtual component handles =====
@@ -249,23 +250,22 @@ function setupEventHandlers() {
   logDebug("Setting up event handlers");
 
   // Watch for input and switch events
+  // Note: We don't call checkSystemState() here to avoid cascading RPC calls
+  // The periodic timer (checkInterval) will handle state checks
   Shelly.addEventHandler(function(event) {
     logDebug("Event received: " + JSON.stringify(event));
 
     if (!event || !event.name || !event.info || !event.info.event)
       return;
 
-    // Input toggle (frost thermostat)
+    // Input toggle (frost thermostat) - just log it, timer will handle response
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
-      logDebug("Input toggle event detected");
-      updateInputState();
-      checkSystemState(); // Immediately check state
+      logDebug("Input toggle event detected - will check on next timer cycle");
     }
 
-    // Switch toggle (outputs)
+    // Switch toggle (outputs) - just log it
     if (event.name === "switch") {
-      logDebug("Switch event detected");
-      updateOutputStates();
+      logDebug("Switch event detected - state will update on next timer cycle");
     }
   });
 }
@@ -669,12 +669,23 @@ function checkSystemState() {
 }
 
 function checkStatus() {
+  // Skip if previous check is still in progress
+  if (state.checkInProgress) {
+    logDebug("Skipping check - previous check still in progress");
+    return;
+  }
+
+  state.checkInProgress = true;
+
   // Update input and output states
   updateInputState();
   updateOutputStates();
 
-  // Check if action needed
-  checkSystemState();
+  // Check if action needed (runs after a short delay to let state updates complete)
+  Timer.set(500, false, function() {
+    checkSystemState();
+    state.checkInProgress = false;
+  });
 }
 
 function startMonitoring() {
