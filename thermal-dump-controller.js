@@ -50,8 +50,8 @@ let config = {
   },
 
   // Timing settings
-  checkInterval: 10 * 1000,  // 10 seconds in milliseconds
-  minRunTime: 5 * 60 * 1000, // 5 minutes minimum run time
+  checkInterval: 60 * 1000,   // 60 seconds - watchdog timer (main logic is event-driven)
+  minRunTime: 5 * 60 * 1000,  // 5 minutes minimum run time
 
   // Virtual component IDs (minimal set)
   virtualComponents: {
@@ -77,9 +77,11 @@ let state = {
   // Input state (frost thermostat)
   frostThermostatActive: false,
 
-  // Output states
+  // Output states (current and desired)
   fanCoilOn: false,
   pumpOn: false,
+  fanCoilDesired: false,      // What we asked for
+  pumpDesired: false,          // What we asked for
   fanCoilOnTime: 0,
   pumpOnTime: 0,
 
@@ -223,49 +225,111 @@ function finishSetup() {
     state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
   }
 
-  // Set up event handlers
+  // Set up event handlers (main control logic is event-driven)
   setupEventHandlers();
 
   // Start MQTT connection
   connectMqtt();
 
-  // Start monitoring loop
+  // Fetch initial state
+  updateInputState();
+  updateOutputStates();
+
+  // Start watchdog timer
   startMonitoring();
 
   console.log("=== Thermal Dump Controller Configuration ===");
   console.log("Device: Shelly 2 PM Gen3 (2 outputs)");
+  console.log("Control: Event-driven with " + (config.checkInterval / 1000) + "s watchdog");
   console.log("Min Tank Temperature: " + config.thresholds.minTankTemp + "°C");
   console.log("Max Temp Delta for Fan: " + config.thresholds.maxTempDelta + "°C");
   console.log("Min Voltage: " + config.thresholds.minVoltage + "V");
   console.log("Max Consumption: " + config.thresholds.maxConsumption + "W");
-  console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
   console.log("Monitoring " + config.dumpLoads.length + " dump load switches (Pro 2PM x2, Pro Dimmer x1)");
   console.log("==============================================");
 
-  updateStatus("Monitoring started");
+  updateStatus("Event-driven monitoring active");
 }
 
 // ===== Event handlers =====
 function setupEventHandlers() {
   logDebug("Setting up event handlers");
 
-  // Watch for input and switch events
-  // Note: We don't call checkSystemState() here to avoid cascading RPC calls
-  // The periodic timer (checkInterval) will handle state checks
+  // Event-driven state updates - no Get calls needed!
   Shelly.addEventHandler(function(event) {
-    logDebug("Event received: " + JSON.stringify(event));
-
-    if (!event || !event.name || !event.info || !event.info.event)
+    if (!event || !event.name || !event.info)
       return;
 
-    // Input toggle (frost thermostat) - just log it, timer will handle response
-    if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
-      logDebug("Input toggle event detected - will check on next timer cycle");
+    logDebug("Event: " + event.name + " on component " + (event.info.component || event.info.id));
+
+    // Input events (frost thermostat)
+    if (event.name === "input" && event.info.id === 0) {
+      if (event.info.state !== undefined) {
+        state.frostThermostatActive = event.info.state;
+        logDebug("Input state from event: " + state.frostThermostatActive);
+      }
+      // Input changes always trigger re-evaluation
+      if (!state.checkInProgress) {
+        state.checkInProgress = true;
+        checkSystemState();
+        state.checkInProgress = false;
+      }
+      return;
     }
 
-    // Switch toggle (outputs) - just log it
+    // Switch events (outputs)
     if (event.name === "switch") {
-      logDebug("Switch event detected - state will update on next timer cycle");
+      let switchId = event.info.id;
+      let newState = event.info.output;
+
+      if (switchId === OUTPUT_FAN_COIL && newState !== undefined) {
+        let oldState = state.fanCoilOn;
+        state.fanCoilOn = newState;
+
+        // Update on time when transitioning to ON
+        if (newState && !oldState) {
+          state.fanCoilOnTime = Date.now();
+        }
+
+        logDebug("Fan coil state from event: " + newState + " (desired: " + state.fanCoilDesired + ")");
+
+        // If state matches desired, we're done (our Set call succeeded)
+        if (state.fanCoilOn === state.fanCoilDesired) {
+          logDebug("Fan coil reached desired state");
+          return;
+        }
+
+        // State doesn't match desired - external change or error, re-evaluate
+        logDebug("Fan coil external change detected, re-evaluating");
+      }
+
+      if (switchId === OUTPUT_PUMP && newState !== undefined) {
+        let oldState = state.pumpOn;
+        state.pumpOn = newState;
+
+        // Update on time when transitioning to ON
+        if (newState && !oldState) {
+          state.pumpOnTime = Date.now();
+        }
+
+        logDebug("Pump state from event: " + newState + " (desired: " + state.pumpDesired + ")");
+
+        // If state matches desired, we're done
+        if (state.pumpOn === state.pumpDesired) {
+          logDebug("Pump reached desired state");
+          return;
+        }
+
+        // External change, re-evaluate
+        logDebug("Pump external change detected, re-evaluating");
+      }
+
+      // Re-evaluate system state if there was an external change
+      if (!state.checkInProgress) {
+        state.checkInProgress = true;
+        checkSystemState();
+        state.checkInProgress = false;
+      }
     }
   });
 }
@@ -549,23 +613,29 @@ function updateOutputStates() {
 function turnOutputOn(outputId, outputName, reason) {
   logDebug("Attempting to turn " + outputName + " ON: " + reason);
 
+  // Record desired state BEFORE making the call
+  if (outputId === OUTPUT_FAN_COIL) {
+    state.fanCoilDesired = true;
+  } else if (outputId === OUTPUT_PUMP) {
+    state.pumpDesired = true;
+  }
+
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: true },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " on: " + error_message);
+        // Clear desired state on error so we'll retry
+        if (outputId === OUTPUT_FAN_COIL) {
+          state.fanCoilDesired = false;
+        } else if (outputId === OUTPUT_PUMP) {
+          state.pumpDesired = false;
+        }
         return;
       }
 
-      if (outputId === OUTPUT_FAN_COIL) {
-        state.fanCoilOn = true;
-        state.fanCoilOnTime = Date.now();
-      } else if (outputId === OUTPUT_PUMP) {
-        state.pumpOn = true;
-        state.pumpOnTime = Date.now();
-      }
-
+      // Event handler will update actual state and on time
       updateStatus(reason);
     }
   );
@@ -585,21 +655,29 @@ function turnOutputOff(outputId, outputName, reason) {
 
   logDebug("Attempting to turn " + outputName + " OFF: " + reason);
 
+  // Record desired state BEFORE making the call
+  if (outputId === OUTPUT_FAN_COIL) {
+    state.fanCoilDesired = false;
+  } else if (outputId === OUTPUT_PUMP) {
+    state.pumpDesired = false;
+  }
+
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: false },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " off: " + error_message);
+        // Clear desired state on error so we'll retry
+        if (outputId === OUTPUT_FAN_COIL) {
+          state.fanCoilDesired = state.fanCoilOn; // Restore to current
+        } else if (outputId === OUTPUT_PUMP) {
+          state.pumpDesired = state.pumpOn; // Restore to current
+        }
         return;
       }
 
-      if (outputId === OUTPUT_FAN_COIL) {
-        state.fanCoilOn = false;
-      } else if (outputId === OUTPUT_PUMP) {
-        state.pumpOn = false;
-      }
-
+      // Event handler will update actual state
       updateStatus(reason);
     }
   );
@@ -668,28 +746,22 @@ function checkSystemState() {
   }
 }
 
+// Watchdog timer - ensures system state is evaluated periodically
+// Main logic is event-driven, but this provides a safety net
 function checkStatus() {
-  // Skip if previous check is still in progress
   if (state.checkInProgress) {
-    logDebug("Skipping check - previous check still in progress");
+    logDebug("Skipping watchdog check - already in progress");
     return;
   }
 
+  logDebug("Watchdog timer check");
   state.checkInProgress = true;
-
-  // Update input and output states
-  updateInputState();
-  updateOutputStates();
-
-  // Check if action needed (runs after a short delay to let state updates complete)
-  Timer.set(500, false, function() {
-    checkSystemState();
-    state.checkInProgress = false;
-  });
+  checkSystemState();
+  state.checkInProgress = false;
 }
 
 function startMonitoring() {
-  logDebug("Starting monitoring with interval: " + (config.checkInterval / 1000) + " seconds");
+  logDebug("Starting watchdog timer: " + (config.checkInterval / 1000) + " seconds");
 
   // Clear existing timer if it exists
   if (state.timerId !== null) {
@@ -697,14 +769,18 @@ function startMonitoring() {
     logDebug("Cleared existing timer");
   }
 
-  // Start new timer
+  // Start watchdog timer (safety net for event-driven logic)
   state.timerId = Timer.set(config.checkInterval, true, function() {
-    logDebug("Timer triggered check");
     checkStatus();
   });
 
-  // Initial check immediately
-  checkStatus();
+  // Do initial evaluation
+  Timer.set(2000, false, function() {
+    logDebug("Initial system evaluation");
+    state.checkInProgress = true;
+    checkSystemState();
+    state.checkInProgress = false;
+  });
 }
 
 // ===== Initialization =====
