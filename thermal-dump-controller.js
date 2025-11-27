@@ -231,10 +231,6 @@ function finishSetup() {
   // Start MQTT connection
   connectMqtt();
 
-  // Fetch initial state
-  updateInputState();
-  updateOutputStates();
-
   // Start watchdog timer
   startMonitoring();
 
@@ -824,10 +820,6 @@ function initializeVirtualComponents() {
 
 function init() {
   console.log("Thermal Dump Controller Script starting");
-
-  // Initial state update
-  updateInputState();
-  updateOutputStates();
 
   // Set up virtual components
   initializeVirtualComponents();
