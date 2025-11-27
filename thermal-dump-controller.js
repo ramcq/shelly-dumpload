@@ -248,8 +248,25 @@ function setupEventHandlers() {
     // Input toggle (frost thermostat)
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
       logDebug("Input toggle event detected");
-      updateInputState();
-      checkSystemState(); // Immediately check state
+
+      // Update state directly from event object to avoid RPC re-entrancy
+      if (event.info.state === undefined) {
+        logDebug("Warning: event.info.state is undefined");
+        return;
+      }
+
+      let newState = Boolean(event.info.state);
+      if (state.frostThermostatActive === newState) {
+        logDebug("Frost thermostat state unchanged: " + newState);
+        return; // Early return if no change
+      }
+
+      state.frostThermostatActive = newState;
+      logDebug("Frost thermostat state updated to: " + state.frostThermostatActive);
+      updateStatus("Frost thermostat changed");
+
+      // Check system state after updating from event (not from RPC callback)
+      checkSystemState();
     }
   });
 }
