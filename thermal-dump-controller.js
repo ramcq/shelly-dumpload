@@ -70,6 +70,7 @@ const OUTPUT_PUMP = 1;     // Output 2 (index 1)
 let state = {
   // MQTT connection
   mqttConnected: false,
+  subscriptionsActive: false,
   keepaliveTimer: null,
   reconnectTimer: null,
 
@@ -337,6 +338,12 @@ function processMqttMessage(topic, message) {
 }
 
 function setupMqttSubscriptionsAndKeepalive() {
+  // Prevent duplicate subscriptions
+  if (state.subscriptionsActive) {
+    logDebug("Subscriptions already active, skipping re-subscribe");
+    return;
+  }
+
   logDebug("Setting up MQTT subscriptions and keepalive");
 
   // Subscribe to Victron topics
@@ -352,6 +359,9 @@ function setupMqttSubscriptionsAndKeepalive() {
     MQTT.subscribe(config.dumpLoads[i].statusTopic, processMqttMessage);
     logDebug("Subscribed to: " + config.dumpLoads[i].statusTopic);
   }
+
+  // Mark subscriptions as active
+  state.subscriptionsActive = true;
 
   // Send initial keepalive
   sendKeepalive(false);
@@ -426,6 +436,7 @@ function connectMqtt() {
   MQTT.setDisconnectHandler(function() {
     console.log("Disconnected from MQTT broker");
     state.mqttConnected = false;
+    state.subscriptionsActive = false;
     resetMqttData();
 
     if (state.keepaliveTimer) {
