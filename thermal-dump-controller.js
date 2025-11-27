@@ -128,21 +128,46 @@ function isThermalDumpNeeded() {
   return false;
 }
 
+// Get dump load tri-state: OFF, ON (heating), or STALLED (thermal cutout)
+function getDumpLoadState() {
+  let anyOn = false;
+  let anyStalled = false;
+
+  for (let i = 0; i < state.dumpLoads.length; i++) {
+    let relay = state.dumpLoads[i];
+    if (relay.output &&
+        relay.voltage >= config.thresholds.minVoltage &&
+        relay.power <= config.thresholds.maxConsumption) {
+      anyStalled = true;
+    } else if (relay.output && relay.power > config.thresholds.maxConsumption) {
+      anyOn = true;
+    }
+  }
+
+  if (anyStalled) {
+    return "STALLED";
+  } else if (anyOn) {
+    return "ON";
+  } else {
+    return "OFF";
+  }
+}
+
 // Update the status display
 function updateStatus(event) {
-  let frostPart = state.frostThermostatActive ? "FROST ACTIVE" : "Frost OK";
-  let fanPart = ", Fan " + (state.fanCoilOn ? "ON" : "OFF");
-  let pumpPart = ", Pump " + (state.pumpOn ? "ON" : "OFF");
+  let frostPart = state.frostThermostatActive ? "FROST ACTIVE" : "Frost:OK";
+  let fanPart = " Fan:" + (state.fanCoilOn ? "ON" : "OFF");
+  let pumpPart = " Pump:" + (state.pumpOn ? "ON" : "OFF");
 
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
-  let tempPart = ", Tank " + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
-  let deltaPart = " (Δ" + tempDelta.toFixed(1) + "°C)";
-  let boilerPart = ", Boiler " + (state.boilerOperating ? "ON" : "OFF");
+  let tempPart = " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
+  let deltaPart = " Δ" + tempDelta.toFixed(1);
+  let boilerPart = " Boiler:" + (state.boilerOperating ? "ON" : "OFF");
 
-  let thermalDumpNeeded = isThermalDumpNeeded();
-  let dumpPart = ", Thermal Dump " + (thermalDumpNeeded ? "NEEDED" : "not needed");
+  let dumpState = getDumpLoadState();
+  let dumpPart = " Dump:" + dumpState;
 
-  let eventPart = event ? ": " + event : "";
+  let eventPart = event ? " - " + event : "";
 
   let statusMessage = frostPart + fanPart + pumpPart + tempPart + deltaPart + boilerPart + dumpPart + eventPart;
 
@@ -655,10 +680,10 @@ function checkSystemState() {
 
   if (!thermalDumpNeeded) {
     if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Tank Still Heating");
+      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Dump loads still active");
     }
     if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "Tank Still Heating");
+      turnOutputOff(OUTPUT_PUMP, "Pump", "Dump loads still active");
     }
     return;
   }
