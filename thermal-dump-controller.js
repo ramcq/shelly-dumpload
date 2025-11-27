@@ -319,9 +319,8 @@ function processMqttMessage(topic, message) {
   }
 }
 
-function handleMqttConnected() {
-  console.log("Connected to MQTT broker");
-  state.mqttConnected = true;
+function setupMqttSubscriptionsAndKeepalive() {
+  logDebug("Setting up MQTT subscriptions and keepalive");
 
   // Subscribe to Victron topics
   let topicPrefix = "N/" + config.cerbo.portalId + "/";
@@ -347,6 +346,12 @@ function handleMqttConnected() {
   state.keepaliveTimer = Timer.set(30000, true, function() {
     sendKeepalive(true);
   });
+}
+
+function handleMqttConnected() {
+  console.log("Connected to MQTT broker");
+  state.mqttConnected = true;
+  setupMqttSubscriptionsAndKeepalive();
 }
 
 function sendKeepalive(suppressRepublish) {
@@ -398,12 +403,30 @@ function connectMqtt() {
     state.reconnectTimer = null;
   }
 
+  // Always set up MQTT event handlers (before any early returns)
+  MQTT.setConnectHandler(handleMqttConnected);
+
+  MQTT.setDisconnectHandler(function() {
+    console.log("Disconnected from MQTT broker");
+    state.mqttConnected = false;
+    resetMqttData();
+
+    if (state.keepaliveTimer) {
+      Timer.clear(state.keepaliveTimer);
+      state.keepaliveTimer = null;
+    }
+
+    scheduleReconnect();
+  });
+
   // Check if MQTT is already connected
   let mqttStatus = Shelly.getComponentStatus("mqtt");
   if (mqttStatus && mqttStatus.connected === true) {
     logDebug("MQTT is already connected");
     if (!state.mqttConnected) {
-      handleMqttConnected();
+      state.mqttConnected = true;
+      // Set up subscriptions immediately since we're already connected
+      setupMqttSubscriptionsAndKeepalive();
     }
     return;
   }
@@ -446,22 +469,6 @@ function connectMqtt() {
     });
     return;
   }
-
-  // Set up MQTT event handlers
-  MQTT.setConnectHandler(handleMqttConnected);
-
-  MQTT.setDisconnectHandler(function() {
-    console.log("Disconnected from MQTT broker");
-    state.mqttConnected = false;
-    resetMqttData();
-
-    if (state.keepaliveTimer) {
-      Timer.clear(state.keepaliveTimer);
-      state.keepaliveTimer = null;
-    }
-
-    scheduleReconnect();
-  });
 }
 
 // ===== Device state management =====
