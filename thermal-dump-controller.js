@@ -10,8 +10,7 @@ let config = {
   cerbo: {
     host: "192.168.1.71", // Cerbo GX IP address
     port: 1883,
-    portalId: "c0847dc9a794", // VRM portal ID
-    reconnectDelay: 5000
+    portalId: "c0847dc9a794" // VRM portal ID
   },
 
   // Dump load devices to monitor (3 switches total)
@@ -71,7 +70,6 @@ let state = {
   // MQTT connection
   mqttConnected: false,
   keepaliveTimer: null,
-  reconnectTimer: null,
 
   // Input state (frost thermostat)
   frostThermostatActive: false,
@@ -403,23 +401,7 @@ function resetMqttData() {
   logDebug("Reset MQTT data due to disconnection");
 }
 
-function scheduleReconnect() {
-  if (!state.reconnectTimer) {
-    logDebug("Scheduling reconnect in " + (config.cerbo.reconnectDelay / 1000) + " seconds");
-    state.reconnectTimer = Timer.set(config.cerbo.reconnectDelay, false, function() {
-      state.reconnectTimer = null;
-      connectMqtt();
-    });
-  }
-}
-
 function connectMqtt() {
-  // Clear any pending reconnect timers
-  if (state.reconnectTimer) {
-    Timer.clear(state.reconnectTimer);
-    state.reconnectTimer = null;
-  }
-
   // Always set up MQTT event handlers (before any early returns)
   MQTT.setConnectHandler(handleMqttConnected);
 
@@ -432,8 +414,6 @@ function connectMqtt() {
       Timer.clear(state.keepaliveTimer);
       state.keepaliveTimer = null;
     }
-
-    scheduleReconnect();
   });
 
   // Check if MQTT is already connected
@@ -477,7 +457,6 @@ function connectMqtt() {
     }, function(result, error_code, error_message) {
       if (error_code !== 0) {
         console.log("Error configuring MQTT: " + error_message);
-        scheduleReconnect();
         return;
       }
 
