@@ -478,13 +478,28 @@ function connectMqtt() {
     state.reconnectTimer = null;
   }
 
-  // Check if MQTT is already connected
+  // Set up MQTT event handlers first
+  MQTT.setConnectHandler(handleMqttConnected);
+
+  MQTT.setDisconnectHandler(function() {
+    console.log("Disconnected from MQTT broker");
+    state.mqttConnected = false;
+    resetMqttData();
+
+    if (state.keepaliveTimer) {
+      Timer.clear(state.keepaliveTimer);
+      state.keepaliveTimer = null;
+    }
+
+    scheduleReconnect();
+  });
+
+  // Check if MQTT is already connected (common case - connection persists between script invocations)
   let mqttStatus = Shelly.getComponentStatus("mqtt");
   if (mqttStatus && mqttStatus.connected === true) {
-    logDebug("MQTT is already connected");
-    if (!state.mqttConnected) {
-      handleMqttConnected();
-    }
+    logDebug("MQTT is already connected - setting up subscriptions and keepalive");
+    // Unconditionally set up subscriptions and send keepalive
+    handleMqttConnected();
     return;
   }
 
@@ -526,22 +541,6 @@ function connectMqtt() {
     });
     return;
   }
-
-  // Set up MQTT event handlers
-  MQTT.setConnectHandler(handleMqttConnected);
-
-  MQTT.setDisconnectHandler(function() {
-    console.log("Disconnected from MQTT broker");
-    state.mqttConnected = false;
-    resetMqttData();
-
-    if (state.keepaliveTimer) {
-      Timer.clear(state.keepaliveTimer);
-      state.keepaliveTimer = null;
-    }
-
-    scheduleReconnect();
-  });
 }
 
 // ===== Device state management =====
