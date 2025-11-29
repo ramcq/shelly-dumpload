@@ -291,6 +291,42 @@ function setupEventHandlers() {
       // Check system state after updating from event (not from RPC callback)
       checkSystemState();
     }
+
+    // Switch toggle (outputs changed by firmware or other means)
+    if (event.name === "switch" && event.info.event === "toggle") {
+      logDebug("Switch toggle event detected");
+
+      // Update state directly from event object to avoid RPC re-entrancy
+      if (event.info.id === undefined || event.info.state === undefined) {
+        logDebug("Warning: event.info.id or event.info.state is undefined");
+        return;
+      }
+
+      let switchId = event.info.id;
+      let newState = Boolean(event.info.state);
+
+      // Update state based on which switch changed
+      if (switchId === OUTPUT_FAN_COIL) {
+        if (state.fanCoilOn === newState) {
+          logDebug("Fan coil state unchanged: " + newState);
+          return;
+        }
+        state.fanCoilOn = newState;
+        logDebug("Fan coil state updated to: " + state.fanCoilOn + " (changed externally)");
+        updateStatus("Fan coil changed externally");
+      } else if (switchId === OUTPUT_PUMP) {
+        if (state.pumpOn === newState) {
+          logDebug("Pump state unchanged: " + newState);
+          return;
+        }
+        state.pumpOn = newState;
+        logDebug("Pump state updated to: " + state.pumpOn + " (changed externally)");
+        updateStatus("Pump changed externally");
+      }
+
+      // Check system state after external change to reconcile
+      checkSystemState();
+    }
   });
 }
 
