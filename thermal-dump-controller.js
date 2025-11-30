@@ -366,8 +366,6 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  logDebug("MQTT message: " + topic);
-
   try {
     let payload = JSON.parse(message);
 
@@ -383,9 +381,6 @@ function processMqttMessage(topic, message) {
         if (payload.apower !== undefined) {
           state.dumpLoads[i].power = parseFloat(payload.apower);
         }
-        logDebug(config.dumpLoads[i].name + ": output=" + state.dumpLoads[i].output +
-                ", voltage=" + state.dumpLoads[i].voltage + "V" +
-                ", power=" + state.dumpLoads[i].power + "W");
         return;
       }
     }
@@ -405,13 +400,11 @@ function processMqttMessage(topic, message) {
     // Update top tank temperature
     if (relativeTopic === config.topics.topTankTemp) {
       state.topTankTemp = parseFloat(payload.value);
-      logDebug("Top tank temp updated: " + state.topTankTemp + "°C");
     }
 
     // Update bottom tank temperature
     if (relativeTopic === config.topics.bottomTankTemp) {
       state.bottomTankTemp = parseFloat(payload.value);
-      logDebug("Bottom tank temp updated: " + state.bottomTankTemp + "°C");
     }
 
     // Update boiler operating status (10=running, 11=stopped)
