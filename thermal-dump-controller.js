@@ -89,7 +89,10 @@ let state = {
   boilerOperating: false,
 
   // Timer
-  timerId: null
+  timerId: null,
+
+  // RPC re-entrancy protection
+  rpcInProgress: 0
 };
 
 // ===== Virtual component handles =====
@@ -597,10 +600,16 @@ function updateOutputStates() {
 function turnOutputOn(outputId, outputName, reason) {
   logDebug("Attempting to turn " + outputName + " ON: " + reason);
 
+  // Increment RPC counter before making the call
+  state.rpcInProgress++;
+
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: true },
     function(result, error_code, error_message) {
+      // Decrement RPC counter when callback executes
+      state.rpcInProgress--;
+
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " on: " + error_message);
         return;
@@ -633,10 +642,16 @@ function turnOutputOff(outputId, outputName, reason) {
 
   logDebug("Attempting to turn " + outputName + " OFF: " + reason);
 
+  // Increment RPC counter before making the call
+  state.rpcInProgress++;
+
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: false },
     function(result, error_code, error_message) {
+      // Decrement RPC counter when callback executes
+      state.rpcInProgress--;
+
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " off: " + error_message);
         return;
@@ -654,6 +669,12 @@ function turnOutputOff(outputId, outputName, reason) {
 }
 
 function checkSystemState() {
+  // Re-entrancy guard: skip if RPC calls are in progress
+  if (state.rpcInProgress > 0) {
+    logDebug("RPC in progress (" + state.rpcInProgress + "), skipping checkSystemState to avoid re-entrancy");
+    return;
+  }
+
   updateStatus("Monitoring");
 
   // PRIORITY 1: Frost thermostat
