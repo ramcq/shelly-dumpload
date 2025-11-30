@@ -631,6 +631,21 @@ function isLoadStalled(load, lastChangeTime) {
   return load.on && load.voltage >= minVoltage && load.power <= maxStallPower;
 }
 
+function shouldChangeDimmer(desired) {
+  // Check if dimmer on/off state changed
+  if (desired.dimmerOn !== state.localDimmer.on) {
+    return true;
+  }
+
+  // If both on, check if brightness change exceeds minimum threshold
+  if (desired.dimmerOn && state.localDimmer.on) {
+    let brightnessDelta = Math.abs(desired.dimmerBrightness - state.localDimmer.brightness);
+    return brightnessDelta >= config.dumpLoad.minChangePercent;
+  }
+
+  return false;
+}
+
 function calculateAvailablePower(useActualDumpPower) {
   // Choose between actual or intended dump power:
   // - Actual: when observing (dry-run, suppressing loads) - shows true available power
@@ -759,17 +774,7 @@ function applyDesiredState(desired, reason) {
       changes.push("Switch1 -> " + (desired.switch1 ? "ON" : "OFF"));
     }
 
-    let dimmerChanged = false;
-    if (desired.dimmerOn !== state.localDimmer.on) {
-      dimmerChanged = true;
-    } else if (desired.dimmerOn && state.localDimmer.on) {
-      let brightnessDelta = Math.abs(desired.dimmerBrightness - state.localDimmer.brightness);
-      if (brightnessDelta >= config.dumpLoad.minChangePercent) {
-        dimmerChanged = true;
-      }
-    }
-
-    if (dimmerChanged) {
+    if (shouldChangeDimmer(desired)) {
       if (desired.dimmerOn) {
         changes.push("Dimmer -> " + desired.dimmerBrightness + "%");
       } else {
@@ -798,17 +803,7 @@ function applyDesiredState(desired, reason) {
   }
 
   // Control Dimmer
-  let dimmerChanged = false;
-  if (desired.dimmerOn !== state.localDimmer.on) {
-    dimmerChanged = true;
-  } else if (desired.dimmerOn && state.localDimmer.on) {
-    let brightnessDelta = Math.abs(desired.dimmerBrightness - state.localDimmer.brightness);
-    if (brightnessDelta >= config.dumpLoad.minChangePercent) {
-      dimmerChanged = true;
-    }
-  }
-
-  if (dimmerChanged) {
+  if (shouldChangeDimmer(desired)) {
     setLocalDimmer(desired.dimmerOn, desired.dimmerBrightness, reason);
     state.localDimmer.lastChangeTime = Date.now();
   }
