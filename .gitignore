@@ -1,0 +1,19 @@
+# Deployment configuration (contains device IPs)
+deploy.conf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

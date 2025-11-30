@@ -1,0 +1,19 @@
+# Shelly Script Deployment Configuration
+# Format: DEVICE_IP:SCRIPT_ID:SCRIPT_FILE:SCRIPT_NAME
+#
+# DEVICE_IP    - IP address of Shelly device
+# SCRIPT_ID    - Script slot number (1-10, recommend using 1)
+# SCRIPT_FILE  - Path to JavaScript file
+# SCRIPT_NAME  - Display name for the script
+
+# Smart Load Controllers (4x devices)
+192.168.1.100:1:smart-load-controller.js:Smart Load
+192.168.1.101:1:smart-load-controller.js:Smart Load
+192.168.1.102:1:smart-load-controller.js:Smart Load
+192.168.1.103:1:smart-load-controller.js:Smart Load
+
+# Thermal Dump Controller (1x device)
+192.168.1.104:1:thermal-dump-controller.js:Thermal Dump
+
+# Surplus Dump Controller (1x device)
+192.168.1.105:1:surplus-dump-controller.js:Surplus Dump

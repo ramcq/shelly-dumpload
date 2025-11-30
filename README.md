@@ -9,6 +9,48 @@ These scripts are designed to work with:
 - **Shelly devices** - Execute control scripts and switch dump loads
 - **MQTT** - Communication between Cerbo GX and Shelly devices
 
+## Quick Start / Deployment
+
+### Automated Deployment (Recommended)
+
+Use the included Python deployment script to upload scripts to multiple devices:
+
+```bash
+# Install dependencies
+pip3 install -r requirements.txt
+
+# Create deployment configuration
+cp deploy.conf.example deploy.conf
+# Edit deploy.conf with your device IPs
+
+# Deploy to all devices
+./deploy.py
+
+# Or deploy to a single device
+./deploy.py --device 192.168.1.100
+```
+
+**Configuration file format** (`deploy.conf`):
+```
+DEVICE_IP:SCRIPT_ID:SCRIPT_FILE:SCRIPT_NAME
+192.168.1.100:1:smart-load-controller.js:Smart Load
+```
+
+The deployment script:
+- Handles chunked uploads for scripts > 1024 bytes
+- Creates scripts if they don't exist
+- Stops and restarts scripts automatically
+- Shows colored status output
+
+### Manual Installation
+
+1. Open Shelly device web interface
+2. Navigate to Scripts
+3. Create new script
+4. Copy/paste appropriate script
+5. Configure settings at top of script
+6. Enable and start script
+
 ## Scripts Overview
 
 ### victron-mqtt.js
@@ -239,15 +281,6 @@ Most controllers enforce minimum on-time (typically 10 minutes) to:
 - Allow loads to stabilize
 
 ---
-
-## Installation
-
-1. Open Shelly device web interface
-2. Navigate to Scripts
-3. Create new script
-4. Copy/paste appropriate script
-5. Configure settings at top of script
-6. Enable and start script
 
 ## Configuration
 
