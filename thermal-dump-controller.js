@@ -74,11 +74,15 @@ let state = {
   // Input state (frost thermostat)
   frostThermostatActive: false,
 
-  // Output states
+  // Output states (actual)
   fanCoilOn: false,
   pumpOn: false,
   fanCoilOnTime: 0,
   pumpOnTime: 0,
+
+  // Output states (intended) - what we're trying to set
+  intendedFanCoilOn: false,
+  intendedPumpOn: false,
 
   // Dump load states
   dumpLoads: [],
@@ -89,10 +93,7 @@ let state = {
   boilerOperating: false,
 
   // Timer
-  timerId: null,
-
-  // RPC re-entrancy protection
-  rpcInProgress: 0
+  timerId: null
 };
 
 // ===== Virtual component handles =====
@@ -299,7 +300,6 @@ function setupEventHandlers() {
     if (event.name === "switch" && event.info.event === "toggle") {
       logDebug("Switch toggle event detected");
 
-      // Update state directly from event object to avoid RPC re-entrancy
       if (event.info.id === undefined || event.info.state === undefined) {
         logDebug("Warning: event.info.id or event.info.state is undefined");
         return;
@@ -308,26 +308,60 @@ function setupEventHandlers() {
       let switchId = event.info.id;
       let newState = Boolean(event.info.state);
 
-      // Update state based on which switch changed
+      // Check if this is an expected change (from our own RPC calls)
       if (switchId === OUTPUT_FAN_COIL) {
-        if (state.fanCoilOn === newState) {
-          logDebug("Fan coil state unchanged: " + newState);
-          return;
+        if (newState === state.intendedFanCoilOn) {
+          // Expected change - just update actual state and return
+          if (state.fanCoilOn !== newState) {
+            state.fanCoilOn = newState;
+            if (newState) {
+              state.fanCoilOnTime = Date.now();
+            }
+            logDebug("Fan coil state updated to: " + state.fanCoilOn + " (expected)");
+            updateStatus("Fan coil changed");
+          }
+          return; // Early return - don't call checkSystemState for expected changes
+        } else {
+          // Unexpected external change - update both actual and intended, then reconcile
+          if (state.fanCoilOn !== newState) {
+            state.fanCoilOn = newState;
+            if (newState) {
+              state.fanCoilOnTime = Date.now();
+            }
+          }
+          state.intendedFanCoilOn = newState; // Sync intended to actual
+          logDebug("Fan coil state updated to: " + state.fanCoilOn + " (changed externally)");
+          updateStatus("Fan coil changed externally");
+          // Fall through to checkSystemState
         }
-        state.fanCoilOn = newState;
-        logDebug("Fan coil state updated to: " + state.fanCoilOn + " (changed externally)");
-        updateStatus("Fan coil changed externally");
       } else if (switchId === OUTPUT_PUMP) {
-        if (state.pumpOn === newState) {
-          logDebug("Pump state unchanged: " + newState);
-          return;
+        if (newState === state.intendedPumpOn) {
+          // Expected change - just update actual state and return
+          if (state.pumpOn !== newState) {
+            state.pumpOn = newState;
+            if (newState) {
+              state.pumpOnTime = Date.now();
+            }
+            logDebug("Pump state updated to: " + state.pumpOn + " (expected)");
+            updateStatus("Pump changed");
+          }
+          return; // Early return - don't call checkSystemState for expected changes
+        } else {
+          // Unexpected external change - update both actual and intended, then reconcile
+          if (state.pumpOn !== newState) {
+            state.pumpOn = newState;
+            if (newState) {
+              state.pumpOnTime = Date.now();
+            }
+          }
+          state.intendedPumpOn = newState; // Sync intended to actual
+          logDebug("Pump state updated to: " + state.pumpOn + " (changed externally)");
+          updateStatus("Pump changed externally");
+          // Fall through to checkSystemState
         }
-        state.pumpOn = newState;
-        logDebug("Pump state updated to: " + state.pumpOn + " (changed externally)");
-        updateStatus("Pump changed externally");
       }
 
-      // Check system state after external change to reconcile
+      // Check system state only after external changes to reconcile
       checkSystemState();
     }
   });
@@ -573,6 +607,7 @@ function updateOutputStates() {
       }
 
       state.fanCoilOn = result.output;
+      state.intendedFanCoilOn = result.output; // Initialize intended to match actual
     }
   );
 
@@ -592,6 +627,7 @@ function updateOutputStates() {
       }
 
       state.pumpOn = result.output;
+      state.intendedPumpOn = result.output; // Initialize intended to match actual
     }
   );
 }
@@ -600,21 +636,23 @@ function updateOutputStates() {
 function turnOutputOn(outputId, outputName, reason) {
   logDebug("Attempting to turn " + outputName + " ON: " + reason);
 
-  // Increment RPC counter before making the call
-  state.rpcInProgress++;
+  // Set intended state before making the RPC call
+  if (outputId === OUTPUT_FAN_COIL) {
+    state.intendedFanCoilOn = true;
+  } else if (outputId === OUTPUT_PUMP) {
+    state.intendedPumpOn = true;
+  }
 
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: true },
     function(result, error_code, error_message) {
-      // Decrement RPC counter when callback executes
-      state.rpcInProgress--;
-
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " on: " + error_message);
         return;
       }
 
+      // Update actual state (defensive, in case event doesn't fire)
       if (outputId === OUTPUT_FAN_COIL) {
         state.fanCoilOn = true;
         state.fanCoilOnTime = Date.now();
@@ -642,21 +680,23 @@ function turnOutputOff(outputId, outputName, reason) {
 
   logDebug("Attempting to turn " + outputName + " OFF: " + reason);
 
-  // Increment RPC counter before making the call
-  state.rpcInProgress++;
+  // Set intended state before making the RPC call
+  if (outputId === OUTPUT_FAN_COIL) {
+    state.intendedFanCoilOn = false;
+  } else if (outputId === OUTPUT_PUMP) {
+    state.intendedPumpOn = false;
+  }
 
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: false },
     function(result, error_code, error_message) {
-      // Decrement RPC counter when callback executes
-      state.rpcInProgress--;
-
       if (error_code !== 0) {
         console.log("Error turning " + outputName + " off: " + error_message);
         return;
       }
 
+      // Update actual state (defensive, in case event doesn't fire)
       if (outputId === OUTPUT_FAN_COIL) {
         state.fanCoilOn = false;
       } else if (outputId === OUTPUT_PUMP) {
@@ -669,12 +709,6 @@ function turnOutputOff(outputId, outputName, reason) {
 }
 
 function checkSystemState() {
-  // Re-entrancy guard: skip if RPC calls are in progress
-  if (state.rpcInProgress > 0) {
-    logDebug("RPC in progress (" + state.rpcInProgress + "), skipping checkSystemState to avoid re-entrancy");
-    return;
-  }
-
   updateStatus("Monitoring");
 
   // PRIORITY 1: Frost thermostat
