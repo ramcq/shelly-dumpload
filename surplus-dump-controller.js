@@ -687,8 +687,7 @@ function controlDumpLoads() {
 
 function calculateDesiredState(available) {
   let desired = {
-    switch0: false,
-    switch1: false,
+    switches: [false, false],  // Remote switches
     dimmerOn: false,
     dimmerBrightness: 0,
     intendedPower: 0
@@ -704,26 +703,17 @@ function calculateDesiredState(available) {
   let remainingPower = available;
   let intendedPower = 0;
 
-  // Allocate Switch 0
+  // Allocate remote switches sequentially
   // If stalled: turn ON but don't decrement budget (next load gets it)
-  if (remainingPower >= heaterPower) {
-    desired.switch0 = true;
-    if (!isLoadStalled(state.remoteSwitches[0], state.remoteSwitches[0].lastChangeTime)) {
-      remainingPower -= heaterPower;
-      intendedPower += heaterPower;
-    } else {
-      logDebug("Switch 0 stalled - keeping ON but not consuming budget");
-    }
-  }
-
-  // Allocate Switch 1
-  if (remainingPower >= heaterPower) {
-    desired.switch1 = true;
-    if (!isLoadStalled(state.remoteSwitches[1], state.remoteSwitches[1].lastChangeTime)) {
-      remainingPower -= heaterPower;
-      intendedPower += heaterPower;
-    } else {
-      logDebug("Switch 1 stalled - keeping ON but not consuming budget");
+  for (let i = 0; i < state.remoteSwitches.length; i++) {
+    if (remainingPower >= heaterPower) {
+      desired.switches[i] = true;
+      if (!isLoadStalled(state.remoteSwitches[i], state.remoteSwitches[i].lastChangeTime)) {
+        remainingPower -= heaterPower;
+        intendedPower += heaterPower;
+      } else {
+        logDebug("Switch " + i + " stalled - keeping ON but not consuming budget");
+      }
     }
   }
 
@@ -742,8 +732,8 @@ function calculateDesiredState(available) {
 
   desired.intendedPower = intendedPower;
 
-  logDebug("Allocation: Switch0=" + (desired.switch0 ? "ON" : "OFF") +
-          ", Switch1=" + (desired.switch1 ? "ON" : "OFF") +
+  logDebug("Allocation: Switch0=" + (desired.switches[0] ? "ON" : "OFF") +
+          ", Switch1=" + (desired.switches[1] ? "ON" : "OFF") +
           ", Dimmer=" + (desired.dimmerOn ? desired.dimmerBrightness + "%" : "OFF") +
           ", intended=" + intendedPower.toFixed(0) + "W" +
           ", unused=" + Math.max(0, remainingPower - (dimmerPercent/100 * heaterPower)).toFixed(0) + "W");
@@ -767,11 +757,10 @@ function applyDesiredState(desired, reason) {
   if (config.dryRun) {
     let changes = [];
 
-    if (desired.switch0 !== state.remoteSwitches[0].on) {
-      changes.push("Switch0 -> " + (desired.switch0 ? "ON" : "OFF"));
-    }
-    if (desired.switch1 !== state.remoteSwitches[1].on) {
-      changes.push("Switch1 -> " + (desired.switch1 ? "ON" : "OFF"));
+    for (let i = 0; i < state.remoteSwitches.length; i++) {
+      if (desired.switches[i] !== state.remoteSwitches[i].on) {
+        changes.push("Switch" + i + " -> " + (desired.switches[i] ? "ON" : "OFF"));
+      }
     }
 
     if (shouldChangeDimmer(desired)) {
@@ -790,16 +779,12 @@ function applyDesiredState(desired, reason) {
   }
 
   // NORMAL MODE: Actually control the loads
-  // Control Switch 0
-  if (desired.switch0 !== state.remoteSwitches[0].on) {
-    sendRemoteSwitchCommand(0, desired.switch0, reason);
-    state.remoteSwitches[0].lastChangeTime = Date.now();
-  }
-
-  // Control Switch 1
-  if (desired.switch1 !== state.remoteSwitches[1].on) {
-    sendRemoteSwitchCommand(1, desired.switch1, reason);
-    state.remoteSwitches[1].lastChangeTime = Date.now();
+  // Control remote switches
+  for (let i = 0; i < state.remoteSwitches.length; i++) {
+    if (desired.switches[i] !== state.remoteSwitches[i].on) {
+      sendRemoteSwitchCommand(i, desired.switches[i], reason);
+      state.remoteSwitches[i].lastChangeTime = Date.now();
+    }
   }
 
   // Control Dimmer
@@ -860,8 +845,7 @@ function checkSystemState() {
 
 function suppressAllLoads(reason) {
   let desired = {
-    switch0: false,
-    switch1: false,
+    switches: [false, false],
     dimmerOn: false,
     dimmerBrightness: 0,
     intendedPower: 0
@@ -872,8 +856,7 @@ function suppressAllLoads(reason) {
 
 function forceMaxDumps(reason) {
   let desired = {
-    switch0: true,
-    switch1: true,
+    switches: [true, true],
     dimmerOn: true,
     dimmerBrightness: 100,
     intendedPower: config.dumpLoad.heaterPower * 3  // All loads at max
