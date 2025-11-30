@@ -130,13 +130,18 @@ function arrayContains(array, value) {
   return false;
 }
 
+// Check if a single dump load is in thermal cutout (stalled)
+// Stalled = output ON + voltage present + negligible power consumption
+function isLoadStalled(load) {
+  return load.output &&
+         load.voltage >= config.thresholds.minVoltage &&
+         load.power <= config.thresholds.maxConsumption;
+}
+
 // Check if any dump load is stalled
 function isDumpLoadStalled() {
   for (let i = 0; i < state.dumpLoads.length; i++) {
-    let relay = state.dumpLoads[i];
-    if (relay.output &&
-        relay.voltage >= config.thresholds.minVoltage &&
-        relay.power <= config.thresholds.maxConsumption) {
+    if (isLoadStalled(state.dumpLoads[i])) {
       return true;
     }
   }
@@ -150,9 +155,7 @@ function getDumpLoadState() {
 
   for (let i = 0; i < state.dumpLoads.length; i++) {
     let relay = state.dumpLoads[i];
-    if (relay.output &&
-        relay.voltage >= config.thresholds.minVoltage &&
-        relay.power <= config.thresholds.maxConsumption) {
+    if (isLoadStalled(relay)) {
       anyStalled = true;
     } else if (relay.output && relay.power > config.thresholds.maxConsumption) {
       anyOn = true;
