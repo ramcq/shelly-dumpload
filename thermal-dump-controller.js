@@ -74,15 +74,23 @@ let state = {
   // Input state (frost thermostat)
   frostThermostatActive: false,
 
-  // Output states (actual)
-  fanCoilOn: false,
-  pumpOn: false,
-  fanCoilOnTime: 0,
-  pumpOnTime: 0,
-
-  // Output states (intended) - what we're trying to set
-  intendedFanCoilOn: false,
-  intendedPumpOn: false,
+  // Output states - array of output objects
+  outputs: [
+    {
+      id: OUTPUT_FAN_COIL,
+      name: "Fan Coil",
+      on: false,           // Actual state
+      intended: false,     // Intended state (for re-entrancy prevention)
+      onTime: 0            // Timestamp when turned on
+    },
+    {
+      id: OUTPUT_PUMP,
+      name: "Pump",
+      on: false,
+      intended: false,
+      onTime: 0
+    }
+  ],
 
   // Dump load states
   dumpLoads: [],
@@ -95,6 +103,11 @@ let state = {
   // Timer
   timerId: null
 };
+
+// Helper to get output object by ID
+function getOutput(outputId) {
+  return state.outputs[outputId];
+}
 
 // ===== Virtual component handles =====
 let handles = {
@@ -158,8 +171,8 @@ function getDumpLoadState() {
 // Update the status display
 function updateStatus(event) {
   let frostPart = state.frostThermostatActive ? "FROST ACTIVE" : "Frost:OK";
-  let fanPart = " Fan:" + (state.fanCoilOn ? "ON" : "OFF");
-  let pumpPart = " Pump:" + (state.pumpOn ? "ON" : "OFF");
+  let fanPart = " Fan:" + (getOutput(OUTPUT_FAN_COIL).on ? "ON" : "OFF");
+  let pumpPart = " Pump:" + (getOutput(OUTPUT_PUMP).on ? "ON" : "OFF");
 
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
   let tempPart = " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
@@ -307,58 +320,37 @@ function setupEventHandlers() {
 
       let switchId = event.info.id;
       let newState = Boolean(event.info.state);
+      let output = getOutput(switchId);
+
+      if (!output) {
+        logDebug("Warning: unknown switch ID " + switchId);
+        return;
+      }
 
       // Check if this is an expected change (from our own RPC calls)
-      if (switchId === OUTPUT_FAN_COIL) {
-        if (newState === state.intendedFanCoilOn) {
-          // Expected change - just update actual state and return
-          if (state.fanCoilOn !== newState) {
-            state.fanCoilOn = newState;
-            if (newState) {
-              state.fanCoilOnTime = Date.now();
-            }
-            logDebug("Fan coil state updated to: " + state.fanCoilOn + " (expected)");
-            updateStatus("Fan coil changed");
+      if (newState === output.intended) {
+        // Expected change - just update actual state and return
+        if (output.on !== newState) {
+          output.on = newState;
+          if (newState) {
+            output.onTime = Date.now();
           }
-          return; // Early return - don't call checkSystemState for expected changes
-        } else {
-          // Unexpected external change - update both actual and intended, then reconcile
-          if (state.fanCoilOn !== newState) {
-            state.fanCoilOn = newState;
-            if (newState) {
-              state.fanCoilOnTime = Date.now();
-            }
-          }
-          state.intendedFanCoilOn = newState; // Sync intended to actual
-          logDebug("Fan coil state updated to: " + state.fanCoilOn + " (changed externally)");
-          updateStatus("Fan coil changed externally");
-          // Fall through to checkSystemState
+          logDebug(output.name + " state updated to: " + output.on + " (expected)");
+          updateStatus(output.name + " changed");
         }
-      } else if (switchId === OUTPUT_PUMP) {
-        if (newState === state.intendedPumpOn) {
-          // Expected change - just update actual state and return
-          if (state.pumpOn !== newState) {
-            state.pumpOn = newState;
-            if (newState) {
-              state.pumpOnTime = Date.now();
-            }
-            logDebug("Pump state updated to: " + state.pumpOn + " (expected)");
-            updateStatus("Pump changed");
+        return; // Early return - don't call checkSystemState for expected changes
+      } else {
+        // Unexpected external change - update both actual and intended, then reconcile
+        if (output.on !== newState) {
+          output.on = newState;
+          if (newState) {
+            output.onTime = Date.now();
           }
-          return; // Early return - don't call checkSystemState for expected changes
-        } else {
-          // Unexpected external change - update both actual and intended, then reconcile
-          if (state.pumpOn !== newState) {
-            state.pumpOn = newState;
-            if (newState) {
-              state.pumpOnTime = Date.now();
-            }
-          }
-          state.intendedPumpOn = newState; // Sync intended to actual
-          logDebug("Pump state updated to: " + state.pumpOn + " (changed externally)");
-          updateStatus("Pump changed externally");
-          // Fall through to checkSystemState
         }
+        output.intended = newState; // Sync intended to actual
+        logDebug(output.name + " state updated to: " + output.on + " (changed externally)");
+        updateStatus(output.name + " changed externally");
+        // Fall through to checkSystemState
       }
 
       // Check system state only after external changes to reconcile
@@ -591,118 +583,82 @@ function updateInputState() {
 }
 
 function updateOutputStates() {
-  // Check output 0 (fan coil)
-  Shelly.call(
-    "Switch.GetStatus",
-    { id: OUTPUT_FAN_COIL },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting fan coil status: " + error_message);
-        return;
+  // Initialize output states from device
+  state.outputs.forEach(function(output) {
+    Shelly.call(
+      "Switch.GetStatus",
+      { id: output.id },
+      function(result, error_code, error_message) {
+        if (error_code !== 0) {
+          console.log("Error getting " + output.name + " status: " + error_message);
+          return;
+        }
+
+        if (!result || result.output === undefined) {
+          console.log("Invalid " + output.name + " status response");
+          return;
+        }
+
+        output.on = result.output;
+        output.intended = result.output; // Initialize intended to match actual
       }
-
-      if (!result || result.output === undefined) {
-        console.log("Invalid fan coil status response");
-        return;
-      }
-
-      state.fanCoilOn = result.output;
-      state.intendedFanCoilOn = result.output; // Initialize intended to match actual
-    }
-  );
-
-  // Check output 1 (pump)
-  Shelly.call(
-    "Switch.GetStatus",
-    { id: OUTPUT_PUMP },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting pump status: " + error_message);
-        return;
-      }
-
-      if (!result || result.output === undefined) {
-        console.log("Invalid pump status response");
-        return;
-      }
-
-      state.pumpOn = result.output;
-      state.intendedPumpOn = result.output; // Initialize intended to match actual
-    }
-  );
+    );
+  });
 }
 
 // ===== Output control logic =====
-function turnOutputOn(outputId, outputName, reason) {
-  logDebug("Attempting to turn " + outputName + " ON: " + reason);
+function turnOutputOn(outputId, reason) {
+  let output = getOutput(outputId);
+  logDebug("Attempting to turn " + output.name + " ON: " + reason);
 
   // Set intended state before making the RPC call
-  if (outputId === OUTPUT_FAN_COIL) {
-    state.intendedFanCoilOn = true;
-  } else if (outputId === OUTPUT_PUMP) {
-    state.intendedPumpOn = true;
-  }
+  output.intended = true;
 
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: true },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
-        console.log("Error turning " + outputName + " on: " + error_message);
+        console.log("Error turning " + output.name + " on: " + error_message);
         return;
       }
 
       // Update actual state (defensive, in case event doesn't fire)
-      if (outputId === OUTPUT_FAN_COIL) {
-        state.fanCoilOn = true;
-        state.fanCoilOnTime = Date.now();
-      } else if (outputId === OUTPUT_PUMP) {
-        state.pumpOn = true;
-        state.pumpOnTime = Date.now();
-      }
-
+      output.on = true;
+      output.onTime = Date.now();
       updateStatus(reason);
     }
   );
 }
 
-function turnOutputOff(outputId, outputName, reason) {
-  let onTime = (outputId === OUTPUT_FAN_COIL) ? state.fanCoilOnTime : state.pumpOnTime;
+function turnOutputOff(outputId, reason) {
+  let output = getOutput(outputId);
 
   // Check minimum run time
   let currentTime = Date.now();
-  let timeElapsed = currentTime - onTime;
+  let timeElapsed = currentTime - output.onTime;
   if (timeElapsed < config.minRunTime) {
-    logDebug("Not turning " + outputName + " off - minimum run time not elapsed (" +
+    logDebug("Not turning " + output.name + " off - minimum run time not elapsed (" +
             (timeElapsed / 1000).toFixed(0) + "s / " + (config.minRunTime / 1000) + "s)");
     return;
   }
 
-  logDebug("Attempting to turn " + outputName + " OFF: " + reason);
+  logDebug("Attempting to turn " + output.name + " OFF: " + reason);
 
   // Set intended state before making the RPC call
-  if (outputId === OUTPUT_FAN_COIL) {
-    state.intendedFanCoilOn = false;
-  } else if (outputId === OUTPUT_PUMP) {
-    state.intendedPumpOn = false;
-  }
+  output.intended = false;
 
   Shelly.call(
     "Switch.Set",
     { id: outputId, on: false },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
-        console.log("Error turning " + outputName + " off: " + error_message);
+        console.log("Error turning " + output.name + " off: " + error_message);
         return;
       }
 
       // Update actual state (defensive, in case event doesn't fire)
-      if (outputId === OUTPUT_FAN_COIL) {
-        state.fanCoilOn = false;
-      } else if (outputId === OUTPUT_PUMP) {
-        state.pumpOn = false;
-      }
-
+      output.on = false;
       updateStatus(reason);
     }
   );
@@ -711,36 +667,39 @@ function turnOutputOff(outputId, outputName, reason) {
 function checkSystemState() {
   updateStatus("Monitoring");
 
+  let fanCoil = getOutput(OUTPUT_FAN_COIL);
+  let pump = getOutput(OUTPUT_PUMP);
+
   // PRIORITY 1: Frost thermostat
   // If frost thermostat is active, turn on BOTH outputs unconditionally
   if (state.frostThermostatActive) {
-    if (!state.fanCoilOn) {
-      turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "FROST PROTECTION");
+    if (!fanCoil.on) {
+      turnOutputOn(OUTPUT_FAN_COIL, "FROST PROTECTION");
     }
-    if (!state.pumpOn) {
-      turnOutputOn(OUTPUT_PUMP, "Pump", "FROST PROTECTION");
+    if (!pump.on) {
+      turnOutputOn(OUTPUT_PUMP, "FROST PROTECTION");
     }
     return; // Skip other checks
   }
 
   // PRIORITY 2: Stop if boiler is operating
   if (state.boilerOperating) {
-    if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Boiler Operating");
+    if (fanCoil.on) {
+      turnOutputOff(OUTPUT_FAN_COIL, "Boiler Operating");
     }
-    if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "Boiler Operating");
+    if (pump.on) {
+      turnOutputOff(OUTPUT_PUMP, "Boiler Operating");
     }
     return; // Skip other checks
   }
 
   // PRIORITY 3: Stop if tank is not hot
   if (state.topTankTemp < config.thresholds.minTankTemp) {
-    if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Tank Below Temperature");
+    if (fanCoil.on) {
+      turnOutputOff(OUTPUT_FAN_COIL, "Tank Below Temperature");
     }
-    if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "Tank Below Temperature");
+    if (pump.on) {
+      turnOutputOff(OUTPUT_PUMP, "Tank Below Temperature");
     }
     return;
   }
@@ -749,32 +708,30 @@ function checkSystemState() {
   let dumpLoadStalled = isDumpLoadStalled();
 
   if (!dumpLoadStalled) {
-    if (state.fanCoilOn) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Monitoring");
+    if (fanCoil.on) {
+      turnOutputOff(OUTPUT_FAN_COIL, "Monitoring");
     }
-    if (state.pumpOn) {
-      turnOutputOff(OUTPUT_PUMP, "Pump", "Monitoring");
+    if (pump.on) {
+      turnOutputOff(OUTPUT_PUMP, "Monitoring");
     }
     return;
   }
 
   // PUMP LOGIC: At least one dump load is cut-out, stir the tank
-  if (!state.pumpOn) {
-    turnOutputOn(OUTPUT_PUMP, "Pump", "Stirring tank");
+  if (!pump.on) {
+    turnOutputOn(OUTPUT_PUMP, "Stirring tank");
   }
 
   // FAN COIL LOGIC: Turn on if temp delta is low
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
 
   if (tempDelta <= config.thresholds.maxTempDelta) {
-    if (!state.fanCoilOn) {
-      turnOutputOn(OUTPUT_FAN_COIL, "Fan Coil", "Dumping heat");
+    if (!fanCoil.on) {
+      turnOutputOn(OUTPUT_FAN_COIL, "Dumping heat");
     }
-  } else if (state.fanCoilOn) {
-    turnOutputOff(OUTPUT_FAN_COIL, "Fan Coil", "Stirring tank");
+  } else if (fanCoil.on) {
+    turnOutputOff(OUTPUT_FAN_COIL, "Stirring tank");
   }
-
-  return;
 }
 
 function startMonitoring() {
