@@ -305,8 +305,6 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  logDebug("MQTT message: " + topic);
-
   try {
     let payload = JSON.parse(message);
 
@@ -347,19 +345,16 @@ function processMqttMessage(topic, message) {
     // Update solar power
     if (relativeTopic === config.victron.solarPower) {
       state.solarPower = parseFloat(payload.value);
-      logDebug("Solar power updated: " + state.solarPower + "W");
     }
 
     // Update AC consumption
     if (relativeTopic === config.victron.acConsumption) {
       state.acConsumption = parseFloat(payload.value);
-      logDebug("AC consumption updated: " + state.acConsumption + "W");
     }
 
     // Update EV charger power
     if (relativeTopic === config.victron.evChargerPower) {
       state.evChargerPower = parseFloat(payload.value);
-      logDebug("EV charger power updated: " + state.evChargerPower + "W");
     }
 
     // Update EV charger status
@@ -379,7 +374,6 @@ function processMqttMessage(topic, message) {
     // Update battery SOC
     if (relativeTopic === config.victron.batterySOC) {
       state.batterySOC = parseFloat(payload.value);
-      logDebug("Battery SOC updated: " + state.batterySOC + "%");
     }
 
     // Update AC source
