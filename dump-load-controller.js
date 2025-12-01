@@ -58,7 +58,8 @@ let state = {
 
   // Relay control state
   lastSwitchedOnTime: 0,     // When we last turned the relay on
-  relayIsOn: false,          // Current relay state
+  relayIsOn: false,          // Current relay state (actual)
+  intendedRelayOn: false,    // Intended relay state (prevents re-entrancy)
   inputIsActive: false,      // State of the local input
 
   // Victron data
@@ -301,8 +302,29 @@ function setupEventHandlers() {
 
     if (event.name === "switch" && event.info.event === "toggle") {
       logDebug("Switch toggle event detected");
-      updateRelayState();
-      checkSystemState(); // Immediately check state
+
+      // Get new state from event
+      let newState = event.info.state;
+
+      // Check if this matches our intended state (prevents re-entrancy)
+      if (newState === state.intendedRelayOn) {
+        // Expected change - just update actual state
+        state.relayIsOn = newState;
+        if (newState) {
+          state.lastSwitchedOnTime = Date.now();
+        }
+        logDebug("Relay state changed as expected to: " + newState);
+        return; // Don't call checkSystemState - this was our intended action
+      } else {
+        // Unexpected change (manual toggle or external control)
+        state.relayIsOn = newState;
+        state.intendedRelayOn = newState; // Sync intended with actual
+        if (newState) {
+          state.lastSwitchedOnTime = Date.now();
+        }
+        logDebug("Relay state changed externally to: " + newState);
+        checkSystemState(); // Reconcile state
+      }
     }
 
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
@@ -530,6 +552,7 @@ function updateRelayState() {
         return;
 
       state.relayIsOn = result.output;
+      state.intendedRelayOn = result.output; // Sync intended with actual
       updateStatus("Relay state updated");
     }
   );
@@ -570,12 +593,16 @@ function updateInputState() {
 function turnRelayOn(reason) {
   logDebug("Attempting to turn relay ON: " + reason);
 
+  // Set intended state before making RPC call
+  state.intendedRelayOn = true;
+
   Shelly.call(
     "Switch.Set",
     { id: 0, on: true },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
         console.log("Error turning relay on: " + error_message);
+        state.intendedRelayOn = state.relayIsOn; // Revert intended on error
         return;
       }
 
@@ -589,12 +616,16 @@ function turnRelayOn(reason) {
 function turnRelayOff(reason) {
   logDebug("Attempting to turn relay OFF: " + reason);
 
+  // Set intended state before making RPC call
+  state.intendedRelayOn = false;
+
   Shelly.call(
     "Switch.Set",
     { id: 0, on: false },
     function(result, error_code, error_message) {
       if (error_code !== 0) {
         console.log("Error turning relay off: " + error_message);
+        state.intendedRelayOn = state.relayIsOn; // Revert intended on error
         return;
       }
 
@@ -673,6 +704,7 @@ function checkStatus() {
       }
 
       state.relayIsOn = result.output;
+      state.intendedRelayOn = result.output; // Sync intended with actual
 
       // Also update input state
       updateInputState();
