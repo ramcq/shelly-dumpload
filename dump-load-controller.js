@@ -86,7 +86,7 @@ let handles = {
 // ===== Helper functions =====
 function logDebug(message) {
   if (config.debugMode) {
-    console.log("[DEBUG] " + message);
+    console.log("[DEBUG-DUMP] " + message);
   }
 }
 
