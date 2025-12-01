@@ -343,8 +343,6 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  logDebug("MQTT message: " + topic);
-
   try {
     // Handle lead relay input status (only if we're NOT the lead relay)
     if (!state.isLeadRelay && state.leadRelayTopic && topic === state.leadRelayTopic) {
@@ -376,14 +374,17 @@ function processMqttMessage(topic, message) {
     // Update battery SOC
     if (relativeTopic === config.topics.batterySOC) {
       state.currentSoc = parseFloat(payload.value);
-      logDebug("Battery SOC updated: " + state.currentSoc + "%");
     }
 
     // Update AC input status
     if (relativeTopic === config.topics.acSource) {
       // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore; 240=Not connected
+      let wasConnected = state.acInputConnected;
       state.acInputConnected = (payload.value !== 240);
-      logDebug("AC connected updated: " + state.acInputConnected);
+      // Only log on state change
+      if (wasConnected !== state.acInputConnected) {
+        console.log("AC input " + (state.acInputConnected ? "connected" : "disconnected"));
+      }
     }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
