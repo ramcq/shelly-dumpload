@@ -50,8 +50,8 @@ let config = {
   dumpLoad: {
     heaterPower: 2690,        // W - nominal power per heater (2.69kW)
     minSurplus: 100,          // W - minimum surplus to turn on any load
-    hysteresis: 150,          // W - hysteresis to prevent oscillation
-    minChangePercent: 5       // % - minimum dimmer change to avoid micro-adjustments
+    batteryHeadroom: 150,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
+    minChangePercent: 2       // % - minimum dimmer change to avoid sub-1% jitter
   },
 
   // Timing settings
@@ -83,7 +83,7 @@ let state = {
   acSource: 240,             // AC source (240 = not connected)
 
   // Calculated values
-  availablePower: 0,         // Available power for dump loads (with hysteresis)
+  availablePower: 0,         // Available power for dump loads (after headroom reserves)
   intendedDumpPower: 0,      // Power we intend dump loads to consume
 
   // Remote switch states
@@ -257,7 +257,8 @@ function finishSetup() {
   console.log("Heater Power: " + config.dumpLoad.heaterPower + "W per unit");
   console.log("Target SOC: " + config.soc.targetSOC + "%");
   console.log("Min Available: " + config.dumpLoad.minSurplus + "W");
-  console.log("Hysteresis: " + config.dumpLoad.hysteresis + "W");
+  console.log("Battery Headroom: " + config.dumpLoad.batteryHeadroom + "W (parasitic + trickle)");
+  console.log("Min Dimmer Change: " + config.dumpLoad.minChangePercent + "%");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
   console.log("EVCS Instance: " + config.victron.evChargerPower.split("/")[1]);
   if (config.dryRun) {
@@ -661,11 +662,10 @@ function calculateAvailablePower(useActualDumpPower) {
     logDebug("EVSE auto mode active, reserving " + evHeadroom.toFixed(0) + "W headroom");
   }
 
-  // Apply hysteresis to prevent oscillation
-  let delta = Math.abs(available - state.availablePower);
-  if (delta > config.dumpLoad.hysteresis) {
-    state.availablePower = available;
-  }
+  // Battery headroom: always reserve power for parasitic loads + trickle charge
+  available -= config.dumpLoad.batteryHeadroom;
+
+  state.availablePower = available;
 
   logDebug("Available power: " + state.availablePower.toFixed(0) + "W (using " +
           (useActualDumpPower ? "actual" : "intended") + " dump power: " +
