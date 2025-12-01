@@ -295,10 +295,23 @@ function setupEventHandlers() {
 
   // Watch for switch and input events
   Shelly.addEventHandler(function(event) {
-    logDebug("Event received: " + JSON.stringify(event));
-
     if (!event || !event.name || !event.info || !event.info.event)
       return;
+
+    // Filter events: only process switch toggle and input toggle events
+    let isRelevantEvent = false;
+    if (event.name === "switch" && event.info.event === "toggle") {
+      isRelevantEvent = true;
+    } else if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
+      isRelevantEvent = true;
+    }
+
+    if (!isRelevantEvent) {
+      // Skip power measurements, status updates, and other events
+      return;
+    }
+
+    logDebug("Event received: " + JSON.stringify(event));
 
     if (event.name === "switch" && event.info.event === "toggle") {
       logDebug("Switch toggle event detected");
