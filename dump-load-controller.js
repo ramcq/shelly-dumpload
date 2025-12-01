@@ -329,7 +329,17 @@ function setupEventHandlers() {
 
     if (event.name === "input" && event.info.event.indexOf("toggle") === 0) {
       logDebug("Input toggle event detected");
-      updateInputState();
+
+      // Get new state from event
+      let newInputState = event.info.state;
+      state.inputIsActive = newInputState;
+
+      // If we're the lead relay, local input represents the manual time switch
+      if (state.isLeadRelay) {
+        state.leadInputActive = state.inputIsActive;
+        logDebug("Lead input updated from local input: " + state.leadInputActive);
+      }
+
       checkSystemState(); // Immediately check state
     }
   });
