@@ -51,7 +51,8 @@ let config = {
     heaterPower: 2690,        // W - nominal power per heater (2.69kW)
     minSurplus: 100,          // W - minimum surplus to turn on any load
     batteryHeadroom: 150,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
-    minChangePercent: 2       // % - minimum dimmer change to avoid sub-1% jitter
+    minChangePercent: 2,      // % - minimum dimmer change to avoid sub-1% jitter
+    minChangeTime: 10 * 60 * 1000  // ms - minimum time between switch state changes (10 minutes)
   },
 
   // Timing settings
@@ -259,6 +260,7 @@ function finishSetup() {
   console.log("Min Available: " + config.dumpLoad.minSurplus + "W");
   console.log("Battery Headroom: " + config.dumpLoad.batteryHeadroom + "W (parasitic + trickle)");
   console.log("Min Dimmer Change: " + config.dumpLoad.minChangePercent + "%");
+  console.log("Min Switch Change Time: " + (config.dumpLoad.minChangeTime / (60 * 1000)) + " minutes");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
   console.log("EVCS Instance: " + config.victron.evChargerPower.split("/")[1]);
   if (config.dryRun) {
@@ -632,6 +634,17 @@ function isLoadStalled(load, lastChangeTime) {
   return load.on && load.voltage >= minVoltage && load.power <= maxStallPower;
 }
 
+function isLoadLocked(lastChangeTime) {
+  // Check if load is within minimum change time window
+  // Prevents rapid on/off cycling that causes relay wear and measurement instability
+  if (lastChangeTime === 0) {
+    return false;  // Never changed, not locked
+  }
+
+  let timeSinceChange = Date.now() - lastChangeTime;
+  return timeSinceChange < config.dumpLoad.minChangeTime;
+}
+
 function shouldChangeDimmer(desired) {
   // Check if dimmer on/off state changed
   if (desired.dimmerOn !== state.localDimmer.on) {
@@ -704,15 +717,37 @@ function calculateDesiredState(available) {
   let intendedPower = 0;
 
   // Allocate remote switches sequentially
-  // If stalled: turn ON but don't decrement budget (next load gets it)
+  // Priority: stalled > locked > normal allocation
+  // - Stalled: ON but not consuming budget (thermal cutout)
+  // - Locked: can't change state, use nominal power if ON
+  // - Normal: allocate based on available power
   for (let i = 0; i < state.remoteSwitches.length; i++) {
-    if (remainingPower >= heaterPower) {
+    let stalled = isLoadStalled(state.remoteSwitches[i], state.remoteSwitches[i].lastChangeTime);
+    let locked = isLoadLocked(state.remoteSwitches[i].lastChangeTime);
+
+    if (stalled) {
+      // Stalled takes priority - load is ON but not consuming power
       desired.switches[i] = true;
-      if (!isLoadStalled(state.remoteSwitches[i], state.remoteSwitches[i].lastChangeTime)) {
+      logDebug("Switch " + i + " stalled - keeping ON but not consuming budget");
+    } else if (locked) {
+      // Load is locked - keep current state
+      desired.switches[i] = state.remoteSwitches[i].on;
+
+      if (state.remoteSwitches[i].on) {
+        // Locked ON - consume budget (nominal power)
         remainingPower -= heaterPower;
         intendedPower += heaterPower;
+        logDebug("Switch " + i + " locked ON, consuming " + heaterPower + "W from budget");
       } else {
-        logDebug("Switch " + i + " stalled - keeping ON but not consuming budget");
+        // Locked OFF - skip allocation, next switch gets the power
+        logDebug("Switch " + i + " locked OFF, skipping allocation");
+      }
+    } else {
+      // Normal allocation
+      if (remainingPower >= heaterPower) {
+        desired.switches[i] = true;
+        remainingPower -= heaterPower;
+        intendedPower += heaterPower;
       }
     }
   }
