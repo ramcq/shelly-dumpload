@@ -544,34 +544,24 @@ function connectMqtt() {
 }
 
 // ===== Device state management =====
-// ONLY called during initialization - do NOT call from RPC callbacks (re-entrancy prohibited)
+// Synchronously update local dimmer state from device
 function updateLocalDimmerState() {
-  Shelly.call(
-    "Light.GetStatus",
-    { id: 0 },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting light status: " + error_message);
-        return;
-      }
+  let lightStatus = Shelly.getComponentStatus("light:0");
 
-      if (!result) {
-        console.log("Invalid light status response");
-        return;
-      }
+  if (lightStatus) {
+    // Initialize all state fields from status
+    state.localDimmer.on = lightStatus.output || false;
+    state.localDimmer.brightness = lightStatus.brightness || 0;
+    state.localDimmer.voltage = lightStatus.voltage || 0;
+    state.localDimmer.power = lightStatus.apower || 0;
 
-      // Initialize all state fields from API result
-      state.localDimmer.on = result.output || false;
-      state.localDimmer.brightness = result.brightness || 0;
-      state.localDimmer.voltage = result.voltage || 0;
-      state.localDimmer.power = result.apower || 0;
-
-      logDebug("Initial light state: on=" + state.localDimmer.on +
-              ", brightness=" + state.localDimmer.brightness + "%" +
-              ", voltage=" + state.localDimmer.voltage + "V" +
-              ", power=" + state.localDimmer.power + "W");
-    }
-  );
+    logDebug("Initial light state: on=" + state.localDimmer.on +
+            ", brightness=" + state.localDimmer.brightness + "%" +
+            ", voltage=" + state.localDimmer.voltage + "V" +
+            ", power=" + state.localDimmer.power + "W");
+  } else {
+    console.log("Warning: Could not get light status");
+  }
 }
 
 // ===== Remote device control via MQTT RPC =====
