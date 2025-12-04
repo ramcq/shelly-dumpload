@@ -554,51 +554,32 @@ function connectMqtt() {
 }
 
 // ===== Device state management =====
+// Synchronously update input and output states from device
 function updateInputState() {
-  Shelly.call(
-    "Input.GetStatus",
-    { id: 0 },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting input status: " + error_message);
-        return;
-      }
+  let inputStatus = Shelly.getComponentStatus("input:0");
 
-      if (!result || result.state === undefined) {
-        console.log("Invalid input status response");
-        return;
-      }
-
-      if (state.frostThermostatActive === result.state)
-        return;
-
-      state.frostThermostatActive = result.state;
+  if (inputStatus && inputStatus.state !== undefined) {
+    if (state.frostThermostatActive !== inputStatus.state) {
+      state.frostThermostatActive = inputStatus.state;
       updateStatus("Frost thermostat changed");
     }
-  );
+  } else {
+    console.log("Warning: Could not get input status");
+  }
 }
 
 function updateOutputStates() {
   // Initialize output states from device
   state.outputs.forEach(function(output) {
-    Shelly.call(
-      "Switch.GetStatus",
-      { id: output.id },
-      function(result, error_code, error_message) {
-        if (error_code !== 0) {
-          console.log("Error getting " + output.name + " status: " + error_message);
-          return;
-        }
+    let switchStatus = Shelly.getComponentStatus("switch:" + output.id);
 
-        if (!result || result.output === undefined) {
-          console.log("Invalid " + output.name + " status response");
-          return;
-        }
-
-        output.on = result.output;
-        output.intended = result.output; // Initialize intended to match actual
-      }
-    );
+    if (switchStatus && switchStatus.output !== undefined) {
+      output.on = switchStatus.output;
+      output.intended = switchStatus.output; // Initialize intended to match actual
+      logDebug(output.name + " initial state: " + (output.on ? "ON" : "OFF"));
+    } else {
+      console.log("Warning: Could not get " + output.name + " status");
+    }
   });
 }
 
