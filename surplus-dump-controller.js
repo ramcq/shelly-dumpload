@@ -283,8 +283,6 @@ function setupEventHandlers() {
     if (!event || event.component !== "light:0" || !event.delta)
       return;
 
-    logDebug("Light status change: " + JSON.stringify(event.delta));
-
     if (event.delta.hasOwnProperty("output")) {
       state.localDimmer.on = Boolean(event.delta.output);
       logDebug("Local output: " + state.localDimmer.on);
@@ -424,15 +422,20 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + config.remoteSwitches.switches[i].statusTopic);
   }
 
-  // Send initial keepalive
-  sendKeepalive(false);
+  // Wait 2 seconds for subscriptions to become active on broker before sending keepalive
+  // This ensures the Cerbo GX will deliver retained messages to our active subscriptions
+  logDebug("Waiting for MQTT subscriptions to become active");
+  Timer.set(2000, false, function() {
+    // Send initial keepalive
+    sendKeepalive(false);
 
-  // Setup periodic keepalive (every 30 seconds)
-  if (state.keepaliveTimer) {
-    Timer.clear(state.keepaliveTimer);
-  }
-  state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(true);
+    // Setup periodic keepalive (every 30 seconds)
+    if (state.keepaliveTimer) {
+      Timer.clear(state.keepaliveTimer);
+    }
+    state.keepaliveTimer = Timer.set(30000, true, function() {
+      sendKeepalive(true);
+    });
   });
 }
 
