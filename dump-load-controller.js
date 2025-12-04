@@ -353,6 +353,7 @@ function setupEventHandlers() {
       // If we're the lead relay, local input represents the manual time switch
       if (state.isLeadRelay) {
         state.leadInputActive = state.inputIsActive;
+        console.log("Lead relay input " + (state.leadInputActive ? "activated" : "deactivated") + " (manual time switch)");
         logDebug("Lead input updated from local input: " + state.leadInputActive);
       }
 
@@ -374,7 +375,14 @@ function processMqttMessage(topic, message) {
     if (!state.isLeadRelay && state.leadRelayTopic && topic === state.leadRelayTopic) {
       let payload = JSON.parse(message);
       if (payload.state !== undefined) {
+        let wasActive = state.leadInputActive;
         state.leadInputActive = Boolean(payload.state);
+
+        // Log to console on state change (this is a priority control signal)
+        if (wasActive !== state.leadInputActive) {
+          console.log("Lead relay input " + (state.leadInputActive ? "activated" : "deactivated") + " (manual time switch)");
+        }
+
         logDebug("Lead input updated via MQTT: " + state.leadInputActive);
         updateStatus("Lead input changed");
 
