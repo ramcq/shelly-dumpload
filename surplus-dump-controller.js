@@ -50,7 +50,7 @@ let config = {
   dumpLoad: {
     heaterPower: 2690,        // W - nominal power per heater (2.69kW)
     minSurplus: 100,          // W - minimum surplus to turn on any load
-    batteryHeadroom: 150,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
+    batteryHeadroom: 200,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
     minChangePercent: 2,      // % - minimum dimmer change to avoid sub-1% jitter
     minChangeTime: 10 * 60 * 1000  // ms - minimum time between switch state changes (10 minutes)
   },
