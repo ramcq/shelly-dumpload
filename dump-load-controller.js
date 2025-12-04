@@ -218,34 +218,34 @@ function finishSetup() {
     console.log("Error getting component handles: " + e.message);
   }
 
-  // Determine device identity
-  determineDeviceIdentity();
+  // Determine device identity first, then continue initialization
+  determineDeviceIdentity(function() {
+    // Set up event handlers
+    setupEventHandlers();
 
-  // Set up event handlers
-  setupEventHandlers();
+    // Start MQTT connection
+    connectMqtt();
 
-  // Start MQTT connection
-  connectMqtt();
+    // Start monitoring loop
+    startMonitoring();
 
-  // Start monitoring loop
-  startMonitoring();
+    console.log("=== Dump Load Controller Configuration ===");
+    console.log("Device is lead relay: " + state.isLeadRelay);
+    console.log("High SOC Threshold: " + state.highSocThreshold + "%");
+    console.log("Low SOC Threshold: " + state.lowSocThreshold + "% (auto-calculated)");
+    console.log("Minimum On Time: " + (config.minOnTime / (60 * 1000)) + " minutes");
+    console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
+    if (!state.isLeadRelay) {
+      console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
+    }
+    console.log("==========================================");
 
-  console.log("=== Dump Load Controller Configuration ===");
-  console.log("Device is lead relay: " + state.isLeadRelay);
-  console.log("High SOC Threshold: " + state.highSocThreshold + "%");
-  console.log("Low SOC Threshold: " + state.lowSocThreshold + "% (auto-calculated)");
-  console.log("Minimum On Time: " + (config.minOnTime / (60 * 1000)) + " minutes");
-  console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
-  if (!state.isLeadRelay) {
-    console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
-  }
-  console.log("==========================================");
-
-  updateStatus("Monitoring started");
+    updateStatus("Monitoring started");
+  });
 }
 
 // Determine if this device is the lead relay
-function determineDeviceIdentity() {
+function determineDeviceIdentity(callback) {
   Shelly.call(
     "Shelly.GetDeviceInfo",
     {},
@@ -255,6 +255,7 @@ function determineDeviceIdentity() {
         // Assume we're not the lead relay
         state.isLeadRelay = false;
         state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
+        if (callback) callback();
         return;
       }
 
@@ -272,6 +273,8 @@ function determineDeviceIdentity() {
         state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
         console.log("This device is NOT the lead relay - will monitor: " + state.leadRelayTopic);
       }
+
+      if (callback) callback();
     }
   );
 }
