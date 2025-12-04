@@ -568,60 +568,31 @@ function connectMqtt() {
 }
 
 // ===== Device state management =====
-function updateRelayState() {
-  Shelly.call(
-    "Switch.GetStatus",
-    { id: 0 },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting switch status: " + error_message);
-        return;
-      }
-
-      if (!result || result.output === undefined) {
-        console.log("Invalid switch status response");
-        return;
-      }
-
-      if (state.relayIsOn === result.output)
-        return;
-
-      state.relayIsOn = result.output;
-      state.intendedRelayOn = result.output; // Sync intended with actual
-      updateStatus("Relay state updated");
+// Synchronously update relay and input state from device
+function updateDeviceState() {
+  // Get switch status
+  let switchStatus = Shelly.getComponentStatus("switch:0");
+  if (switchStatus && switchStatus.output !== undefined) {
+    if (state.relayIsOn !== switchStatus.output) {
+      state.relayIsOn = switchStatus.output;
+      state.intendedRelayOn = switchStatus.output; // Sync intended with actual
+      logDebug("Relay state synced: " + state.relayIsOn);
     }
-  );
-}
+  }
 
-function updateInputState() {
-  Shelly.call(
-    "Input.GetStatus",
-    { id: 0 },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting input status: " + error_message);
-        return;
-      }
-
-      if (!result || result.state === undefined) {
-        console.log("Invalid input status response");
-        return;
-      }
-
-      if (state.inputIsActive === result.state)
-        return;
-
-      state.inputIsActive = result.state;
+  // Get input status
+  let inputStatus = Shelly.getComponentStatus("input:0");
+  if (inputStatus && inputStatus.state !== undefined) {
+    if (state.inputIsActive !== inputStatus.state) {
+      state.inputIsActive = inputStatus.state;
 
       // If we're the lead relay, local input represents the manual time switch
       if (state.isLeadRelay) {
         state.leadInputActive = state.inputIsActive;
-        logDebug("Lead input updated from local input: " + state.leadInputActive);
+        logDebug("Lead input synced from local input: " + state.leadInputActive);
       }
-
-      updateStatus("Input state updated");
     }
-  );
+  }
 }
 
 // ===== Relay control logic =====
@@ -723,31 +694,9 @@ function checkSystemState() {
 }
 
 function checkStatus() {
-  // Update relay and input state
-  Shelly.call(
-    "Switch.GetStatus",
-    { id: 0 },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error getting switch status: " + error_message);
-        return;
-      }
-
-      if (!result || result.output === undefined) {
-        console.log("Invalid switch status response");
-        return;
-      }
-
-      state.relayIsOn = result.output;
-      state.intendedRelayOn = result.output; // Sync intended with actual
-
-      // Also update input state
-      updateInputState();
-
-      // Check if action needed
-      checkSystemState();
-    }
-  );
+  // Synchronously update device state, then evaluate control logic
+  updateDeviceState();
+  checkSystemState();
 }
 
 function startMonitoring() {
@@ -814,8 +763,7 @@ function init() {
   console.log("Dump Load Controller Script starting");
 
   // Initial state update
-  updateRelayState();
-  updateInputState();
+  updateDeviceState();
 
   // Set up virtual components
   initializeVirtualComponents();
