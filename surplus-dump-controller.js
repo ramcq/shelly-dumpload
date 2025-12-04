@@ -74,6 +74,9 @@ let state = {
   mqttConnected: false,
   keepaliveTimer: null,
 
+  // Initialization tracking
+  initialized: false,        // True after first evaluation (prevents disrupting running loads)
+
   // Victron data
   solarPower: 0,
   acConsumption: 0,
@@ -820,18 +823,31 @@ function applyDesiredState(desired, reason) {
 }
 
 function checkSystemState() {
-  // PRIORITY 0: Wait for initial remote switch status
-  let allSwitchStatusReceived = true;
-  for (let i = 0; i < state.remoteSwitches.length; i++) {
-    if (!state.remoteSwitches[i].statusReceived) {
-      allSwitchStatusReceived = false;
-      break;
+  // INITIALIZATION: Wait for all switch statuses, then initialize intended power
+  if (!state.initialized) {
+    // Check if all switch statuses received
+    let allSwitchStatusReceived = true;
+    for (let i = 0; i < state.remoteSwitches.length; i++) {
+      if (!state.remoteSwitches[i].statusReceived) {
+        allSwitchStatusReceived = false;
+        break;
+      }
     }
-  }
-  if (!allSwitchStatusReceived) {
-    logDebug("Waiting for initial remote switch status before controlling");
-    updateStatus("Waiting for initial data");
-    return;
+
+    if (!allSwitchStatusReceived) {
+      logDebug("Waiting for initial remote switch status before controlling");
+      updateStatus("Waiting for initial data");
+      return;
+    }
+
+    // We have all statuses - initialize intended power to match actual state
+    // This prevents disrupting loads that are already running
+    state.initialized = true;
+    let actualPower = getDumpLoadPower();
+    if (actualPower > 0) {
+      state.intendedDumpPower = actualPower;
+      console.log("Initialized intended dump power to actual: " + actualPower.toFixed(0) + "W");
+    }
   }
 
   // PRIORITY 1: Generator suppression
