@@ -9,6 +9,34 @@ These scripts are designed to work with:
 - **Shelly devices** - Execute control scripts and switch dump loads
 - **MQTT** - Communication between Cerbo GX and Shelly devices
 
+### Power Flow Architecture
+
+Understanding the power flow is critical for safe operation:
+
+**AC Output Side:**
+- PV inverters and hydro generators connect to the **AC output** (not AC input)
+- Power from PV/hydro flows directly to loads on AC output
+- This power does NOT count against the inverter's battery contribution limit
+
+**Inverter Contribution:**
+- The inverter has a maximum power limit for battery discharge (typically 14-15kW)
+- **Inverter Contribution = AC Consumption - Solar/Hydro Generation**
+- This is the power being drawn from the battery through the inverter
+- Exceeding this limit causes inverter overload warnings and can trip the system
+
+**Critical Safety Limit:**
+The surplus-dump-controller enforces a 12kW inverter contribution limit (leaving 2kW headroom for unexpected loads like kettles, immersions, etc.). When battery SOC is high and dump loads are enabled, the controller calculates:
+```
+Current Inverter Contribution = AC Consumption - Solar Power
+Available Capacity = 12kW - Current Inverter Contribution
+```
+Dump loads are only enabled up to the available capacity to prevent overload.
+
+**Generator/Hydro Interactions:**
+- Diesel generators can knock hydro generators offline when they start (frequency/voltage mismatch)
+- Always verify hydro has restarted after diesel generator test runs or power events
+- Monitor PV Inverter [33] power output to confirm hydro operation
+
 ## Quick Start / Deployment
 
 ### Automated Deployment (Recommended)
@@ -188,8 +216,15 @@ Available = Solar - AC Consumption + Intended Dumps - EV Headroom
 1. Wait for initial data (avoid acting on stale state)
 2. **Generator suppression** - Turn off all loads if AC source active
 3. **Low SOC protection** - Suppress if SOC < target (97% default)
-4. **High SOC protection** - Force max dumps if SOC > target (prevent overcharge)
+4. **High SOC protection** - Enable dumps if SOC > target (respecting inverter limit to prevent overload)
 5. **Normal surplus control** - Sequential load allocation
+
+**Inverter Overload Protection:**
+- Enforces maximum inverter contribution limit (default: 12kW from battery)
+- Calculates: `Inverter Contribution = AC Consumption - Solar Generation`
+- In high SOC mode, only enables dump loads that fit within available inverter capacity
+- Prevents overload when house loads (cooking, immersions, etc.) are already high
+- Configurable via `config.dumpLoad.maxInverterContribution` (default: 12000W)
 
 **EVSE Coordination:**
 - Reserves headroom when EV charger in auto mode

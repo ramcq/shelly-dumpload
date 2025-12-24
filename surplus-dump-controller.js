@@ -52,7 +52,8 @@ let config = {
     minSurplus: 100,          // W - minimum surplus to turn on any load
     batteryHeadroom: 200,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
     minChangePercent: 2,      // % - minimum dimmer change to avoid sub-1% jitter
-    minChangeTime: 10 * 60 * 1000  // ms - minimum time between switch state changes (10 minutes)
+    minChangeTime: 10 * 60 * 1000,  // ms - minimum time between switch state changes (10 minutes)
+    maxInverterContribution: 12000  // W - max power inverter can add from battery (12kW limit, leaves 2kW headroom for unexpected loads)
   },
 
   // Timing settings
@@ -874,9 +875,34 @@ function checkSystemState() {
   // PRIORITY 3: High SOC protection (overcharge)
   if (state.batterySOC > config.soc.targetSOC) {
     logDebug("Battery SOC above target (" + state.batterySOC + "% > " +
-            config.soc.targetSOC + "%), forcing maximum dump");
-    forceMaxDumps("High SOC");
-    updateStatus("High SOC - Max dump");
+            config.soc.targetSOC + "%), enabling dump loads with inverter limit");
+
+    // Calculate base house load (excluding dump loads to avoid feedback loop)
+    // Use actual dump power in dry-run (observing), intended when controlling (avoid feedback)
+    let dumpPower = config.dryRun ? getDumpLoadPower() : state.intendedDumpPower;
+    let baseLoad = state.acConsumption - dumpPower;
+
+    // Calculate inverter contribution for base load only
+    // Inverter contribution = base load minus solar/hydro generation
+    let baseInverterContribution = baseLoad - state.solarPower;
+
+    // Calculate maximum dump power that keeps inverter within limit
+    // Can be negative if base load already exceeds limit (will safely disable all loads)
+    let maxDumpPower = config.dumpLoad.maxInverterContribution - baseInverterContribution;
+
+    logDebug("High SOC: solar=" + state.solarPower.toFixed(0) + "W" +
+            ", acConsumption=" + state.acConsumption.toFixed(0) + "W" +
+            ", dumpPower=" + dumpPower.toFixed(0) + "W (" + (config.dryRun ? "actual" : "intended") + ")" +
+            ", baseLoad=" + baseLoad.toFixed(0) + "W" +
+            ", baseInverterContrib=" + baseInverterContribution.toFixed(0) + "W" +
+            ", maxDumpPower=" + maxDumpPower.toFixed(0) + "W" +
+            ", limit=" + config.dumpLoad.maxInverterContribution + "W");
+
+    // Use normal allocation algorithm with max dump power as the available power
+    // calculateDesiredState safely handles negative values by turning all loads OFF
+    let desired = calculateDesiredState(maxDumpPower);
+    applyDesiredState(desired, "High SOC (inverter-limited)");
+    updateStatus("High SOC - Max dump (limited)");
     return;
   }
 
@@ -893,17 +919,6 @@ function suppressAllLoads(reason) {
     dimmerOn: false,
     dimmerBrightness: 0,
     intendedPower: 0
-  };
-
-  applyDesiredState(desired, reason);
-}
-
-function forceMaxDumps(reason) {
-  let desired = {
-    switches: [true, true],
-    dimmerOn: true,
-    dimmerBrightness: 100,
-    intendedPower: config.dumpLoad.heaterPower * 3  // All loads at max
   };
 
   applyDesiredState(desired, reason);
