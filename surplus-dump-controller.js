@@ -872,7 +872,17 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 3: High SOC protection (overcharge)
+  // PRIORITY 3: EV auto mode - always use normal surplus control
+  // When EV is in auto mode, it naturally manages surplus and prevents overcharge
+  // Using max dumps would cause EV to reduce charging, creating oscillation
+  if (state.evChargerMode === 1 && state.evChargerStatus === 2) {
+    logDebug("EV in auto mode - using normal surplus control (SOC: " + state.batterySOC + "%)");
+    controlDumpLoads();  // Normal mode with EV headroom reservation
+    updateStatus("EV auto mode");
+    return;
+  }
+
+  // PRIORITY 4: High SOC protection (overcharge) - only when no EV auto mode
   if (state.batterySOC > config.soc.targetSOC) {
     logDebug("Battery SOC above target (" + state.batterySOC + "% > " +
             config.soc.targetSOC + "%), enabling dump loads with inverter limit");
@@ -906,7 +916,7 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 4: Normal operation - control based on surplus
+  // PRIORITY 5: Normal operation - control based on surplus
   controlDumpLoads();
 
   // Update status display with current values (after control logic)

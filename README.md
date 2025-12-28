@@ -216,8 +216,9 @@ Available = Solar - AC Consumption + Intended Dumps - EV Headroom
 1. Wait for initial data (avoid acting on stale state)
 2. **Generator suppression** - Turn off all loads if AC source active
 3. **Low SOC protection** - Suppress if SOC < target (97% default)
-4. **High SOC protection** - Enable dumps if SOC > target (respecting inverter limit to prevent overload)
-5. **Normal surplus control** - Sequential load allocation
+4. **EV auto mode** - Use normal surplus control when EV charging in auto (prevents oscillation)
+5. **High SOC protection** - Enable dumps if SOC > target (respecting inverter limit, only when no EV auto)
+6. **Normal surplus control** - Sequential load allocation
 
 **Inverter Overload Protection:**
 - Enforces maximum inverter contribution limit (default: 12kW from battery)
