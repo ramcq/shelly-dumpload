@@ -666,14 +666,18 @@ function calculateAvailablePower(useActualDumpPower) {
   let available = state.solarPower - state.acConsumption + dumpPower;
 
   // EV charger in auto mode: reserve headroom to avoid fighting with its surplus control
-  if (state.evChargerMode === 1 && state.evChargerStatus === 2) {
+  let evCharging = (state.evChargerMode === 1 && state.evChargerStatus === 2);
+  if (evCharging) {
     let evHeadroom = config.evse.maxHeadroom - state.evChargerPower;
     available -= evHeadroom;
     logDebug("EVSE auto mode active, reserving " + evHeadroom.toFixed(0) + "W headroom");
   }
 
-  // Battery headroom: always reserve power for parasitic loads + trickle charge
-  available -= config.dumpLoad.batteryHeadroom;
+  // Battery headroom: reserve power for parasitic loads + trickle charge
+  // Skip during EV charging to absorb EVSE ampere-step surplus (prevents SOC drift 97%→98%)
+  if (!evCharging) {
+    available -= config.dumpLoad.batteryHeadroom;
+  }
 
   state.availablePower = available;
 
