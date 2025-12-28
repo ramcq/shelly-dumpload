@@ -616,6 +616,12 @@ function setLocalDimmer(turnOn, brightness, reason) {
 }
 
 // ===== Surplus calculation and control logic =====
+function isEvChargingInAuto() {
+  // Check if EV charger is actively charging in auto mode
+  // Mode 1 = Auto, Status 2 = Charging
+  return state.evChargerMode === 1 && state.evChargerStatus === 2;
+}
+
 function isLoadStalled(load, lastChangeTime) {
   // Detect thermal cutout: output ON, voltage present, but negligible power
   const minVoltage = 200;   // V - power is present
@@ -666,7 +672,7 @@ function calculateAvailablePower(useActualDumpPower) {
   let available = state.solarPower - state.acConsumption + dumpPower;
 
   // EV charger in auto mode: reserve headroom to avoid fighting with its surplus control
-  let evCharging = (state.evChargerMode === 1 && state.evChargerStatus === 2);
+  let evCharging = isEvChargingInAuto();
   if (evCharging) {
     let evHeadroom = config.evse.maxHeadroom - state.evChargerPower;
     available -= evHeadroom;
@@ -879,7 +885,7 @@ function checkSystemState() {
   // PRIORITY 3: EV auto mode - always use normal surplus control
   // When EV is in auto mode, it naturally manages surplus and prevents overcharge
   // Using max dumps would cause EV to reduce charging, creating oscillation
-  if (state.evChargerMode === 1 && state.evChargerStatus === 2) {
+  if (isEvChargingInAuto()) {
     logDebug("EV in auto mode - using normal surplus control (SOC: " + state.batterySOC + "%)");
     controlDumpLoads();  // Normal mode with EV headroom reservation
     updateStatus("EV auto mode");
