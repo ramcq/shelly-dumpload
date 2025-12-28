@@ -38,7 +38,7 @@ let config = {
 
   // EVSE control
   evse: {
-    maxHeadroom: 7000         // W - max headroom to reserve when EVSE is in auto mode
+    maxHeadroom: 7360         // W - max headroom to reserve when EVSE is in auto mode (230V × 32A)
   },
 
   // SOC control
