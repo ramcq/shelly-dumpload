@@ -10,7 +10,6 @@ import json
 import requests
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple
 
 # ANSI color codes
 class Color:
@@ -20,7 +19,7 @@ class Color:
     BLUE = '\033[0;34m'
     NC = '\033[0m'  # No Color
 
-def read_config(config_file: Path) -> List[Dict]:
+def read_config(config_file: Path) -> list[dict]:
     """Read deployment configuration from file."""
     deployments = []
 
@@ -150,7 +149,7 @@ def start_script(device_ip: str, script_id: int):
     result = rpc_call(device_ip, "Script.Start", {"id": script_id})
     return result
 
-def deploy_script(deployment: Dict) -> bool:
+def deploy_script(deployment: dict) -> bool:
     """Deploy a single script to a device."""
     device_ip = deployment['ip']
     script_id = deployment['script_id']
