@@ -674,9 +674,9 @@ function calculateAvailablePower(useActualDumpPower) {
   // EV charger in auto mode: reserve headroom to avoid fighting with its surplus control
   let evCharging = isEvChargingInAuto();
   if (evCharging) {
-    let evHeadroom = config.evse.maxHeadroom - state.evChargerPower;
+    let evHeadroom = Math.min(460, config.evse.maxHeadroom - state.evChargerPower);
     available -= evHeadroom;
-    logDebug("EVSE auto mode active, reserving " + evHeadroom.toFixed(0) + "W headroom");
+    logDebug("EVSE auto mode active, reserving " + evHeadroom.toFixed(0) + "W headroom (2A margin)");
   }
 
   // Battery headroom: reserve power for parasitic loads + trickle charge
