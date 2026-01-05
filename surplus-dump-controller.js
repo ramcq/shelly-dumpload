@@ -694,15 +694,54 @@ function calculateAvailablePower(useActualDumpPower) {
   return state.availablePower;
 }
 
-function controlDumpLoads() {
+// Calculate maximum safe dump power based on inverter discharge limit
+// Returns the maximum power dumps can consume without exceeding inverter capacity
+function calculateMaxDumpPower(useActualDumpPower) {
+  // Calculate base house load (excluding dump loads to avoid feedback loop)
+  let dumpPower = useActualDumpPower ? getDumpLoadPower() : state.intendedDumpPower;
+  let baseLoad = state.acConsumption - dumpPower;
+
+  // Calculate inverter contribution for base load only
+  // Inverter contribution = base load minus solar/hydro generation
+  let baseInverterContribution = baseLoad - state.solarPower;
+
+  // Calculate maximum dump power that keeps inverter within limit
+  // Can be negative if base load already exceeds limit (will safely disable all loads)
+  let maxDumpPower = config.dumpLoad.maxInverterContribution - baseInverterContribution;
+
+  logDebug("Max dump calc: solar=" + state.solarPower.toFixed(0) + "W" +
+          ", acConsumption=" + state.acConsumption.toFixed(0) + "W" +
+          ", dumpPower=" + dumpPower.toFixed(0) + "W (" + (useActualDumpPower ? "actual" : "intended") + ")" +
+          ", baseLoad=" + baseLoad.toFixed(0) + "W" +
+          ", baseInverterContrib=" + baseInverterContribution.toFixed(0) + "W" +
+          ", maxDumpPower=" + maxDumpPower.toFixed(0) + "W" +
+          ", limit=" + config.dumpLoad.maxInverterContribution + "W");
+
+  return maxDumpPower;
+}
+
+function controlDumpLoads(dumpMax) {
   // Use actual dump power in dry-run (observing), intended when controlling (avoid feedback)
-  let available = calculateAvailablePower(config.dryRun);
+  let useActual = config.dryRun;
+
+  let available;
+  let reason;
+
+  if (dumpMax) {
+    // High SOC mode: run dumps up to inverter discharge limit
+    available = calculateMaxDumpPower(useActual);
+    reason = "High SOC (inverter-limited)";
+  } else {
+    // Normal mode: track surplus power
+    available = calculateAvailablePower(useActual);
+    reason = "Surplus control";
+  }
 
   // Calculate desired state
   let desiredState = calculateDesiredState(available);
 
   // Apply the desired state
-  applyDesiredState(desiredState, "Surplus control");
+  applyDesiredState(desiredState, reason);
 }
 
 function calculateDesiredState(available) {
@@ -887,49 +926,23 @@ function checkSystemState() {
   // Using max dumps would cause EV to reduce charging, creating oscillation
   if (isEvChargingInAuto()) {
     logDebug("EV in auto mode - using normal surplus control (SOC: " + state.batterySOC + "%)");
-    controlDumpLoads();  // Normal mode with EV headroom reservation
+    controlDumpLoads(false);  // Normal mode with EV headroom reservation
     updateStatus("EV auto mode");
     return;
   }
 
   // PRIORITY 4: High SOC protection (overcharge) - only when no EV auto mode
+  // Run dumps at maximum safe level (up to inverter discharge limit)
   if (state.batterySOC > config.soc.targetSOC) {
     logDebug("Battery SOC above target (" + state.batterySOC + "% > " +
             config.soc.targetSOC + "%), enabling dump loads with inverter limit");
-
-    // Calculate base house load (excluding dump loads to avoid feedback loop)
-    // Use actual dump power in dry-run (observing), intended when controlling (avoid feedback)
-    let dumpPower = config.dryRun ? getDumpLoadPower() : state.intendedDumpPower;
-    let baseLoad = state.acConsumption - dumpPower;
-
-    // Calculate inverter contribution for base load only
-    // Inverter contribution = base load minus solar/hydro generation
-    let baseInverterContribution = baseLoad - state.solarPower;
-
-    // Calculate maximum dump power that keeps inverter within limit
-    // Can be negative if base load already exceeds limit (will safely disable all loads)
-    let maxDumpPower = config.dumpLoad.maxInverterContribution - baseInverterContribution;
-
-    logDebug("High SOC: solar=" + state.solarPower.toFixed(0) + "W" +
-            ", acConsumption=" + state.acConsumption.toFixed(0) + "W" +
-            ", dumpPower=" + dumpPower.toFixed(0) + "W (" + (config.dryRun ? "actual" : "intended") + ")" +
-            ", baseLoad=" + baseLoad.toFixed(0) + "W" +
-            ", baseInverterContrib=" + baseInverterContribution.toFixed(0) + "W" +
-            ", maxDumpPower=" + maxDumpPower.toFixed(0) + "W" +
-            ", limit=" + config.dumpLoad.maxInverterContribution + "W");
-
-    // Use normal allocation algorithm with max dump power as the available power
-    // calculateDesiredState safely handles negative values by turning all loads OFF
-    let desired = calculateDesiredState(maxDumpPower);
-    applyDesiredState(desired, "High SOC (inverter-limited)");
-    updateStatus("High SOC - Max dump (limited)");
+    controlDumpLoads(true);  // Dump max mode - run up to inverter limit
+    updateStatus("High SOC - Max dump");
     return;
   }
 
   // PRIORITY 5: Normal operation - control based on surplus
-  controlDumpLoads();
-
-  // Update status display with current values (after control logic)
+  controlDumpLoads(false);
   updateStatus("Monitoring");
 }
 
