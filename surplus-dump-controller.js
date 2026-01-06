@@ -33,7 +33,8 @@ let config = {
     evChargerStatus: "evcharger/40/Status",       // EV charger status (2=Charging)
     evChargerMode: "evcharger/40/Mode",           // EV charger mode (0=Manual, 1=Auto, 2=Scheduled)
     batterySOC: "system/0/Dc/Battery/Soc",        // Battery SOC (%)
-    acSource: "system/0/Ac/ActiveIn/Source"       // AC source (0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected)
+    acSource: "system/0/Ac/ActiveIn/Source",      // AC source (0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected)
+    inverterOutput: "vebus/276/Ac/Out/L1/P"       // VE.Bus inverter output power (W)
   },
 
   // EVSE control
@@ -53,7 +54,8 @@ let config = {
     batteryHeadroom: 200,     // W - reserve for parasitic loads (Cerbo, BMS) + trickle charge
     minChangePercent: 2,      // % - minimum dimmer change to avoid sub-1% jitter
     minChangeTime: 10 * 60 * 1000,  // ms - minimum time between switch state changes (10 minutes)
-    maxInverterContribution: 12000  // W - max power inverter can add from battery (12kW limit, leaves 2kW headroom for unexpected loads)
+    maxInverterContribution: 12000, // W - max power inverter can add from battery (12kW limit, leaves 2kW headroom for unexpected loads)
+    emergencyInverterLimit: 14000   // W - emergency shutoff threshold for inverter output (fast-path protection)
   },
 
   // Timing settings
@@ -86,6 +88,7 @@ let state = {
   evChargerMode: 0,          // 0=Manual, 1=Auto, 2=Scheduled
   batterySOC: 0,             // Battery state of charge (%)
   acSource: 240,             // AC source (240 = not connected)
+  inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Calculated values
   availablePower: 0,         // Available power for dump loads (after headroom reserves)
@@ -386,6 +389,18 @@ function processMqttMessage(topic, message) {
       state.acSource = parseInt(payload.value);
       logDebug("AC source updated: " + state.acSource + " (" + getAcSourceString(state.acSource) + ")");
     }
+
+    // Update inverter output - with fast-path emergency suppression
+    if (relativeTopic === config.victron.inverterOutput) {
+      state.inverterOutput = parseFloat(payload.value);
+
+      // Fast-path emergency suppression if inverter output exceeds safe limit
+      if (state.initialized && state.inverterOutput > config.dumpLoad.emergencyInverterLimit) {
+        logDebug("EMERGENCY: Inverter output " + state.inverterOutput.toFixed(0) +
+                "W exceeds " + config.dumpLoad.emergencyInverterLimit + "W limit - suppressing all loads");
+        suppressAllLoads("Inverter overload protection");
+      }
+    }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
   }
@@ -473,6 +488,7 @@ function resetMqttData() {
   state.evChargerMode = 0;
   state.batterySOC = 0;
   state.acSource = 240; // Not connected
+  state.inverterOutput = 0;
 
   for (let i = 0; i < state.remoteSwitches.length; i++) {
     state.remoteSwitches[i].on = false;
