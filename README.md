@@ -13,29 +13,37 @@ These scripts are designed to work with:
 
 Understanding the power flow is critical for safe operation:
 
-**AC Output Side:**
-- PV inverters and hydro generators connect to the **AC output** (not AC input)
-- Power from PV/hydro flows directly to loads on AC output
+**AC-Coupled Generation (AC Output Side):**
+- PV inverters and AC-coupled hydro generators connect to the **AC output** (not AC input)
+- Power from AC-coupled sources flows directly to loads on AC output
 - This power does NOT count against the inverter's battery contribution limit
+- Victron reports this as "Solar" power (system/0/Ac/PvOnOutput/L1/Power)
+
+**DC-Coupled Generation (Battery Side):**
+- DC-coupled sources (small hydro turbine) connect to the DC side
+- Power must go through the inverter to reach AC loads
+- This power DOES count against the inverter's output capacity limit
 
 **Inverter Contribution:**
 - The inverter has a maximum power limit for battery discharge (typically 14-15kW)
-- **Inverter Contribution = AC Consumption - Solar/Hydro Generation**
-- This is the power being drawn from the battery through the inverter
+- **Inverter Contribution = AC Consumption - AC-Coupled Generation**
+- DC-coupled generation goes through the inverter, so it doesn't reduce inverter contribution
+- This is the net power being drawn from the battery through the inverter
 - Exceeding this limit causes inverter overload warnings and can trip the system
 
 **Critical Safety Limit:**
 The surplus-dump-controller enforces a 12kW inverter contribution limit (leaving 2kW headroom for unexpected loads like kettles, immersions, etc.). When battery SOC is high and dump loads are enabled, the controller calculates:
 ```
-Current Inverter Contribution = AC Consumption - Solar Power
+Current Inverter Contribution = AC Consumption - AC-Coupled Generation
 Available Capacity = 12kW - Current Inverter Contribution
 ```
-Dump loads are only enabled up to the available capacity to prevent overload.
+DC-coupled sources (like the DC hydro turbine) add power but go through the inverter, so they don't reduce the inverter contribution calculation. Dump loads are only enabled up to the available capacity to prevent overload.
 
-**Generator/Hydro Interactions:**
-- Diesel generators can knock hydro generators offline when they start (frequency/voltage mismatch)
-- Always verify hydro has restarted after diesel generator test runs or power events
-- Monitor PV Inverter [33] power output to confirm hydro operation
+**Generator/AC Hydro Interactions:**
+- Diesel generators can knock AC-coupled hydro generators offline when they start (frequency/voltage mismatch)
+- Always verify AC hydro has restarted after diesel generator test runs or power events
+- Monitor PV Inverter [33] power output to confirm AC hydro operation
+- DC-coupled hydro is not affected by generator starts as it's on the battery side
 
 ## Quick Start / Deployment
 
@@ -188,16 +196,20 @@ Simplified dump load controller with multi-device coordination. One device acts 
 
 ### surplus-dump-controller.js
 **Device:** Shelly Pro 0/1-10V Dimmer PM
-**Purpose:** Intelligent solar surplus management across multiple dump loads
+**Purpose:** Intelligent surplus power management across multiple dump loads
 
-Advanced controller managing three 2.69kW dump loads to consume excess solar power:
+Advanced controller managing three 2.69kW dump loads to consume excess generation:
 - **Local dimmer output** - 0-10V controlled SSR (variable 0-100%)
 - **Remote Switch 0** - Shelly Pro 2PM via MQTT RPC (ON/OFF)
 - **Remote Switch 1** - Shelly Pro 2PM via MQTT RPC (ON/OFF)
 
+**Power Sources:**
+- AC-coupled generation (solar + AC hydro) - reported as "Solar" by Victron
+- DC-coupled hydro turbine - small hydro on DC side
+
 **Algorithm:**
 ```
-Available = Solar - AC Consumption + Intended Dumps - EV Headroom
+Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom
 ```
 
 **Key Features:**
@@ -222,7 +234,8 @@ Available = Solar - AC Consumption + Intended Dumps - EV Headroom
 
 **Inverter Overload Protection:**
 - Enforces maximum inverter contribution limit (default: 12kW from battery)
-- Calculates: `Inverter Contribution = AC Consumption - Solar Generation`
+- Calculates: `Inverter Contribution = AC Consumption - AC-Coupled Generation`
+- DC-coupled sources (DC hydro) go through the inverter, so they add to available power but don't reduce inverter load
 - In high SOC mode, only enables dump loads that fit within available inverter capacity
 - Prevents overload when house loads (cooking, immersions, etc.) are already high
 - Configurable via `config.dumpLoad.maxInverterContribution` (default: 12000W)

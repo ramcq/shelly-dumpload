@@ -3,7 +3,7 @@
 // - Local dimmer output (SSR controlled via 0-10V)
 // - Two remote switches on Shelly Pro 2PM (via MQTT RPC)
 //
-// Algorithm: Available = Solar - AC + Intended Dumps - EV Headroom
+// Algorithm: Available = Solar + DC Hydro - AC + Intended Dumps - EV Headroom
 // Uses intended dump power (not actual) to avoid feedback loops
 // Suppresses dumps if SOC < target or generator active
 
@@ -27,7 +27,8 @@ let config = {
 
   // Victron topics (will be prefixed with N/<portalId>/)
   victron: {
-    solarPower: "system/0/Ac/PvOnOutput/L1/Power",           // Total solar power (W)
+    solarPower: "system/0/Ac/PvOnOutput/L1/Power",           // AC-coupled generation (solar + AC hydro) (W)
+    dcHydroPower: "dcsource/279/Dc/0/Power",                 // DC-coupled hydro turbine power (W)
     acConsumption: "system/0/Ac/ConsumptionOnOutput/L1/Power", // AC consumption (W)
     evChargerPower: "evcharger/40/Ac/Power",      // EV charger power (W)
     evChargerStatus: "evcharger/40/Status",       // EV charger status (2=Charging)
@@ -82,6 +83,7 @@ let state = {
 
   // Victron data
   solarPower: 0,
+  dcHydroPower: 0,
   acConsumption: 0,
   evChargerPower: 0,
   evChargerStatus: 0,        // 0=Disconnected, 1=Connected, 2=Charging, 3=Charged
@@ -175,6 +177,7 @@ function updateStatus(event) {
   let modePart = config.dryRun ? "[DRY-RUN] " : "";
   let socPart = "SOC:" + state.batterySOC.toFixed(0) + "%";
   let solarPart = " Solar:" + state.solarPower.toFixed(0) + "W";
+  let dcHydroPart = state.dcHydroPower > 0 ? " DC Hydro:" + state.dcHydroPower.toFixed(0) + "W" : "";
   let availPart = " Avail:" + state.availablePower.toFixed(0) + "W";
 
   let acSourceStr = getAcSourceString(state.acSource);
@@ -197,7 +200,7 @@ function updateStatus(event) {
 
   let eventPart = event ? " - " + event : "";
 
-  let statusMessage = modePart + socPart + solarPart + availPart + acPart + evPart + dumpPart + loadsPart + eventPart;
+  let statusMessage = modePart + socPart + solarPart + dcHydroPart + availPart + acPart + evPart + dumpPart + loadsPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -355,6 +358,11 @@ function processMqttMessage(topic, message) {
       state.solarPower = parseFloat(payload.value);
     }
 
+    // Update DC hydro power
+    if (relativeTopic === config.victron.dcHydroPower) {
+      state.dcHydroPower = parseFloat(payload.value);
+    }
+
     // Update AC consumption
     if (relativeTopic === config.victron.acConsumption) {
       state.acConsumption = parseFloat(payload.value);
@@ -482,6 +490,7 @@ function sendKeepalive(suppressRepublish) {
 
 function resetMqttData() {
   state.solarPower = 0;
+  state.dcHydroPower = 0;
   state.acConsumption = 0;
   state.evChargerPower = 0;
   state.evChargerStatus = 0;
@@ -685,7 +694,7 @@ function calculateAvailablePower(useActualDumpPower) {
   // - Intended: when controlling - avoids feedback loops
   let dumpPower = useActualDumpPower ? getDumpLoadPower() : state.intendedDumpPower;
 
-  let available = state.solarPower - state.acConsumption + dumpPower;
+  let available = state.solarPower + state.dcHydroPower - state.acConsumption + dumpPower;
 
   // EV charger in auto mode: reserve headroom to avoid fighting with its surplus control
   let evCharging = isEvChargingInAuto();
@@ -718,7 +727,7 @@ function calculateMaxDumpPower(useActualDumpPower) {
   let baseLoad = state.acConsumption - dumpPower;
 
   // Calculate inverter contribution for base load only
-  // Inverter contribution = base load minus solar/hydro generation
+  // Inverter contribution = base load minus AC-coupled generation (DC hydro goes through inverter)
   let baseInverterContribution = baseLoad - state.solarPower;
 
   // Calculate maximum dump power that keeps inverter within limit
@@ -726,6 +735,7 @@ function calculateMaxDumpPower(useActualDumpPower) {
   let maxDumpPower = config.dumpLoad.maxInverterContribution - baseInverterContribution;
 
   logDebug("Max dump calc: solar=" + state.solarPower.toFixed(0) + "W" +
+          ", dcHydro=" + state.dcHydroPower.toFixed(0) + "W (DC, via inverter)" +
           ", acConsumption=" + state.acConsumption.toFixed(0) + "W" +
           ", dumpPower=" + dumpPower.toFixed(0) + "W (" + (useActualDumpPower ? "actual" : "intended") + ")" +
           ", baseLoad=" + baseLoad.toFixed(0) + "W" +
