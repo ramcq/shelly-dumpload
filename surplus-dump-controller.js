@@ -18,9 +18,10 @@ let config = {
 
   // Remote dump load switches (Shelly Pro 2PM)
   remoteSwitches: {
+    deviceId: "shellypro2pm-ec6260a03d70",
     switches: [
-      { id: 0, name: "Pro 2PM Switch 0", statusTopic: "shellypro2pm-ec6260a03d70/status/switch:0" },
-      { id: 1, name: "Pro 2PM Switch 1", statusTopic: "shellypro2pm-ec6260a03d70/status/switch:1" }
+      { id: 0, name: "Pro 2PM Switch 0" },
+      { id: 1, name: "Pro 2PM Switch 1" }
     ],
     rpcTopic: "shellypro2pm-ec6260a03d70/rpc"
   },
@@ -320,25 +321,29 @@ function processMqttMessage(topic, message) {
     let payload = JSON.parse(message);
 
     // Check if this is a remote switch status message
-    for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
-      if (topic === config.remoteSwitches.switches[i].statusTopic) {
+    let switchTopicPrefix = config.remoteSwitches.deviceId + "/status/switch:";
+    if (topic.indexOf(switchTopicPrefix) === 0) {
+      // Extract switch ID from topic (e.g., "shellypro2pm-ec6260a03d70/status/switch:0" -> "0")
+      let switchId = parseInt(topic.substring(switchTopicPrefix.length));
+
+      if (switchId >= 0 && switchId < state.remoteSwitches.length) {
         if (payload.output !== undefined) {
-          state.remoteSwitches[i].on = Boolean(payload.output);
+          state.remoteSwitches[switchId].on = Boolean(payload.output);
         }
         if (payload.voltage !== undefined) {
-          state.remoteSwitches[i].voltage = parseFloat(payload.voltage);
+          state.remoteSwitches[switchId].voltage = parseFloat(payload.voltage);
         }
         if (payload.apower !== undefined) {
-          state.remoteSwitches[i].power = parseFloat(payload.apower);
+          state.remoteSwitches[switchId].power = parseFloat(payload.apower);
         }
 
-        state.remoteSwitches[i].statusReceived = true;
+        state.remoteSwitches[switchId].statusReceived = true;
 
-        logDebug(config.remoteSwitches.switches[i].name + ": on=" + state.remoteSwitches[i].on +
-                ", voltage=" + state.remoteSwitches[i].voltage + "V" +
-                ", power=" + state.remoteSwitches[i].power + "W");
-        return;
+        logDebug(config.remoteSwitches.switches[switchId].name + ": on=" + state.remoteSwitches[switchId].on +
+                ", voltage=" + state.remoteSwitches[switchId].voltage + "V" +
+                ", power=" + state.remoteSwitches[switchId].power + "W");
       }
+      return;
     }
 
     // Handle Victron Cerbo GX messages
@@ -440,11 +445,10 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + topic);
   }
 
-  // Subscribe to remote switch topics
-  for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
-    MQTT.subscribe(config.remoteSwitches.switches[i].statusTopic, processMqttMessage);
-    logDebug("Subscribed to: " + config.remoteSwitches.switches[i].statusTopic);
-  }
+  // Subscribe to remote switch topics using wildcard (reduces 2 subscriptions to 1)
+  let switchTopic = config.remoteSwitches.deviceId + "/status/+";
+  MQTT.subscribe(switchTopic, processMqttMessage);
+  logDebug("Subscribed to: " + switchTopic);
 
   // Wait 2 seconds for subscriptions to become active on broker before sending keepalive
   // This ensures the Cerbo GX will deliver retained messages to our active subscriptions
