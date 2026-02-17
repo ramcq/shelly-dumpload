@@ -57,7 +57,7 @@ let config = {
     minChangePercent: 2,      // % - minimum dimmer change to avoid sub-1% jitter
     minChangeTime: 10 * 60 * 1000,  // ms - minimum time between switch state changes (10 minutes)
     maxInverterContribution: 12000, // W - max power inverter can add from battery (12kW limit, leaves 2kW headroom for unexpected loads)
-    emergencyInverterLimit: 14000   // W - emergency shutoff threshold for inverter output (fast-path protection)
+    emergencyInverterLimit: 13000   // W - emergency shutoff threshold for inverter output (fast-path protection)
   },
 
   // Timing settings
