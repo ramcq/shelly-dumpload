@@ -24,6 +24,12 @@ let config = {
     // Low threshold is automatically set to highThreshold - 1
   },
 
+  // Inverter overload protection
+  inverter: {
+    emergencyLimit: 13000,  // W - fast-path emergency shutoff for inverter output
+    heaterPower: 2700       // W - approximate power of this heater (for headroom check before enabling)
+  },
+
   // Timing settings
   minOnTime: 10 * 60 * 1000, // 10 minutes in milliseconds
   checkInterval: 30 * 1000,  // 30 seconds in milliseconds
@@ -31,14 +37,15 @@ let config = {
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
     batterySOC: "system/0/Dc/Battery/Soc",
-    acSource: "system/0/Ac/ActiveIn/Source" // 0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected
+    acSource: "system/0/Ac/ActiveIn/Source", // 0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected
+    inverterOutput: "vebus/276/Ac/Out/L1/P"  // VE.Bus inverter output power (W)
   },
 
-  // Virtual component IDs (minimal set)
+  // Virtual component IDs (matches smart-load-controller.js for drop-in replacement)
   virtualComponents: {
-    highSocThreshold: 200,
-    status: 201,
-    group: 202
+    highSocThreshold: 202,  // same as smart-load-controller VCOMP_HIGH_SOC
+    status: 204,            // same as smart-load-controller VCOMP_STATUS
+    group: 205              // same as smart-load-controller VCOMP_GROUP
   },
 
   // Debug mode
@@ -65,6 +72,7 @@ let state = {
   // Victron data
   currentSoc: 0,             // Current SOC from Victron
   acInputConnected: false,   // Current AC input status from Victron
+  inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Lead relay state
   leadInputActive: false,    // State of the lead relay's input (manual time switch)
@@ -105,6 +113,7 @@ function updateStatus(event) {
   let thresholdInfo = " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
 
   let relayPart = state.relayIsOn ? "Relay ON" : "Relay OFF";
+  let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
 
   let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
   let leadPart = !state.isLeadRelay ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
@@ -112,7 +121,7 @@ function updateStatus(event) {
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = socPart + thresholdInfo + ", " + relayPart + inputPart + leadPart + acPart + eventPart;
+  let statusMessage = socPart + thresholdInfo + ", " + relayPart + inverterPart + inputPart + leadPart + acPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -233,6 +242,8 @@ function finishSetup() {
     console.log("Device is lead relay: " + state.isLeadRelay);
     console.log("High SOC Threshold: " + state.highSocThreshold + "%");
     console.log("Low SOC Threshold: " + state.lowSocThreshold + "% (auto-calculated)");
+    console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
+    console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W");
     console.log("Minimum On Time: " + (config.minOnTime / (60 * 1000)) + " minutes");
     console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
     if (!state.isLeadRelay) {
@@ -259,13 +270,9 @@ function determineDeviceIdentity(callback) {
         return;
       }
 
-      // Extract device ID from MAC (last 12 hex chars without colons)
-      let mac = result.mac;
-      let deviceId = mac.replace(/:/g, "").toLowerCase();
+      logDebug("Device ID: " + result.id);
 
-      logDebug("Device MAC: " + mac + ", Device ID: " + deviceId);
-
-      if (deviceId === config.leadRelay.deviceId) {
+      if (result.id.indexOf(config.leadRelay.deviceId) >= 0) {
         state.isLeadRelay = true;
         console.log("This device IS the lead relay - will use local input");
       } else {
@@ -420,6 +427,18 @@ function processMqttMessage(topic, message) {
         console.log("AC input " + (state.acInputConnected ? "connected" : "disconnected"));
       }
     }
+
+    // Update inverter output - with fast-path emergency suppression
+    if (relativeTopic === config.topics.inverterOutput) {
+      state.inverterOutput = parseFloat(payload.value);
+
+      // Fast-path emergency suppression if inverter output exceeds safe limit
+      if (state.inverterOutput > config.inverter.emergencyLimit && state.relayIsOn) {
+        logDebug("EMERGENCY: Inverter output " + state.inverterOutput.toFixed(0) +
+                "W exceeds " + config.inverter.emergencyLimit + "W limit - turning off");
+        turnRelayOff("Inverter overload protection");
+      }
+    }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
   }
@@ -477,6 +496,7 @@ function sendKeepalive(suppressRepublish) {
 function resetMqttData() {
   state.currentSoc = 0;
   state.acInputConnected = false;
+  state.inverterOutput = 0;
   if (!state.isLeadRelay) {
     state.leadInputActive = false;
   }
@@ -641,13 +661,34 @@ function turnRelayOff(reason) {
   );
 }
 
+// Check if there is sufficient inverter headroom to safely enable the relay
+function canSafelyEnable() {
+  if (state.inverterOutput > 0 &&
+      state.inverterOutput + config.inverter.heaterPower >= config.inverter.emergencyLimit) {
+    logDebug("Inverter headroom insufficient: " + state.inverterOutput.toFixed(0) + "W + " +
+            config.inverter.heaterPower + "W >= " + config.inverter.emergencyLimit + "W");
+    updateStatus("Inverter limited");
+    return false;
+  }
+  return true;
+}
+
 function checkSystemState() {
   updateStatus("Monitoring");
+
+  // PRIORITY 0: Emergency inverter overload protection (overrides everything)
+  // Belt-and-braces for the MQTT fast-path check in processMqttMessage
+  if (state.inverterOutput > config.inverter.emergencyLimit) {
+    if (state.relayIsOn) {
+      turnRelayOff("Inverter overload: " + state.inverterOutput.toFixed(0) + "W");
+    }
+    return;
+  }
 
   // PRIORITY 1: Local input (for the lead relay, this is the manual time switch)
   // For non-lead relays, local input can still manually override
   if (state.inputIsActive) {
-    if (!state.relayIsOn) {
+    if (!state.relayIsOn && canSafelyEnable()) {
       turnRelayOn("Local input active" + (state.isLeadRelay ? " (manual time switch)" : ""));
     }
     return; // Skip other checks when local input is active
@@ -655,7 +696,7 @@ function checkSystemState() {
 
   // PRIORITY 2: Lead relay input (manual time switch) - only for non-lead relays
   if (!state.isLeadRelay && state.leadInputActive) {
-    if (!state.relayIsOn) {
+    if (!state.relayIsOn && canSafelyEnable()) {
       turnRelayOn("Lead relay input active (manual time switch ON)");
     }
     return; // Skip other checks
@@ -683,8 +724,8 @@ function checkSystemState() {
 
   logDebug("SOC control: Current=" + state.currentSoc + "%, High=" + state.highSocThreshold + "%, Low=" + state.lowSocThreshold + "%");
 
-  // Turn on when SOC reaches high threshold
-  if (state.currentSoc >= state.highSocThreshold && !state.relayIsOn) {
+  // Turn on when SOC reaches high threshold (with inverter headroom check)
+  if (state.currentSoc >= state.highSocThreshold && !state.relayIsOn && canSafelyEnable()) {
     turnRelayOn("SOC high: " + state.currentSoc + "% >= " + state.highSocThreshold + "%");
   }
   // Turn off when SOC reaches low threshold (and minimum on time elapsed)

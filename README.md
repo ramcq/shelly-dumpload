@@ -177,10 +177,17 @@ Simplified dump load controller with multi-device coordination. One device acts 
 - AC input suppression
 
 **Priority Logic:**
-1. **Local input** - Highest priority (manual override)
-2. **Lead relay input** - Follow manual time switch on lead device
+0. **Inverter overload** - Emergency suppression if inverter output exceeds limit (overrides all)
+1. **Local input** - Manual override (with inverter headroom check before enabling)
+2. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
 3. **AC input check** - Suppress if grid/generator connected
-4. **SOC control** - Normal automatic operation
+4. **SOC control** - Normal automatic operation (with headroom checks before enabling)
+
+**Inverter Overload Protection:**
+- Fast-path emergency suppression on MQTT receipt if inverter output exceeds 13kW
+- Pre-enable headroom check: won't turn on if current inverter output + heater power >= 13kW
+- Belt-and-braces polling check in checkSystemState (every 30s)
+- Configurable via `config.inverter.emergencyLimit` and `config.inverter.heaterPower`
 
 **Configuration:**
 - Set `config.leadRelay.deviceId` to MAC address of lead relay
@@ -188,9 +195,9 @@ Simplified dump load controller with multi-device coordination. One device acts 
 - Lead relay uses local input; others monitor via MQTT
 
 **Virtual Components:**
-- `number:200` - High SOC Threshold (%)
-- `text:201` - Status display
-- `group:202` - Dump Load Controller group
+- `number:202` - High SOC Threshold (%) — matches smart-load-controller for drop-in replacement
+- `text:204` - Status display
+- `group:205` - Dump Load Controller group
 
 ---
 
