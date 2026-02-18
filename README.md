@@ -93,80 +93,6 @@ The deployment script:
 
 ## Scripts Overview
 
-### victron-mqtt.js
-**Device:** Shelly Plus 1PM (or any Shelly with virtual components)
-**Purpose:** MQTT bridge providing Victron data to other Shelly scripts
-
-Connects to Victron Cerbo GX via MQTT and creates virtual components displaying:
-- Battery State of Charge (SOC %)
-- AC input connection status (Grid/Generator/Shore connected or not)
-
-Other scripts can read these virtual components to make control decisions based on Victron system state.
-
-**Virtual Components Created:**
-- `number:210` - Battery SOC
-- `boolean:211` - AC Input Connected
-- `group:212` - Cerbo GX Monitor group
-
----
-
-### frequency-controller.js
-**Device:** Shelly Plus 1PM Gen3
-**Purpose:** Grid frequency response for demand management
-
-Monitors grid frequency and controls relay based on configurable thresholds. Designed for grid stabilization programs where loads are shed/added based on frequency.
-
-**Features:**
-- User-configurable high/low frequency thresholds
-- Consecutive high reading requirement (prevents false triggers)
-- Minimum on-time enforcement (10 minutes default)
-- Input override support
-- Real-time status display
-
-**Control Logic:**
-1. Monitor grid frequency via Shelly's built-in measurement
-2. Turn ON when frequency ≥ high threshold for N consecutive readings
-3. Turn OFF when frequency ≤ low threshold AND minimum on-time elapsed
-4. Local input can override (manual control)
-
-**Virtual Components:**
-- `number:200` - High Frequency Threshold (Hz)
-- `number:201` - Low Frequency Threshold (Hz)
-- `text:204` - Status display
-- `group:205` - Frequency Controller group
-
----
-
-### smart-load-controller.js
-**Device:** Shelly Plus 1PM Gen3
-**Purpose:** Dual-mode controller (frequency OR battery SOC)
-
-Combines frequency-based and SOC-based control in a single script. Automatically switches between modes based on availability of Victron SOC data.
-
-**Operating Modes:**
-
-**SOC Mode** (when Victron data available):
-- Turn ON when SOC ≥ high SOC threshold
-- Turn OFF when SOC ≤ low SOC threshold
-- Suppressed if AC input connected
-
-**Frequency Mode** (fallback when no SOC data):
-- Same logic as frequency-controller.js
-
-**Dependencies:**
-- Optionally uses virtual components from `victron-mqtt.js` (components 210, 211)
-- Can operate standalone using only frequency data
-
-**Virtual Components:**
-- `number:200` - High Frequency Threshold
-- `number:201` - Low Frequency Threshold
-- `number:202` - High SOC Threshold
-- `number:203` - Low SOC Threshold
-- `text:204` - Status display
-- `group:205` - Smart Load Controller group
-
----
-
 ### dump-load-controller.js
 **Device:** Shelly Plus 1PM Gen3
 **Purpose:** Coordinated SOC-based dump load control with manual override
@@ -366,21 +292,11 @@ let config = {
 
 ## System Design Recommendations
 
-### Typical Solar Dump Load System
+### Typical Off-Grid Dump Load System
 
-1. **victron-mqtt.js** - Run on one Shelly to provide SOC data
-2. **surplus-dump-controller.js** - Run on dimmer device for intelligent surplus management
-3. **thermal-dump-controller.js** - Run on 2PM controlling pump/fan for heat recovery
-
-### Grid-Tied with Frequency Response
-
-1. **frequency-controller.js** - Run on controllable loads
-2. Configure thresholds per utility requirements
-
-### Off-Grid SOC Management
-
-1. **victron-mqtt.js** - Provide SOC to network
+1. **surplus-dump-controller.js** - Run on dimmer device for intelligent surplus management
 2. **dump-load-controller.js** - Run on multiple 1PM devices with lead relay coordination
+3. **thermal-dump-controller.js** - Run on 2PM controlling pump/fan for heat recovery
 
 ---
 
