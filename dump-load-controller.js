@@ -15,7 +15,7 @@ let config = {
   // Lead relay (has manual time switch connected to its input)
   leadRelay: {
     deviceId: "543204558fc8", // Device ID of the lead relay
-    // When the lead input is ON, all dump load relays should turn on
+    inputTopic: "shelly1pmg3-543204558fc8/status/input:0" // MQTT topic for lead relay input
   },
 
   // SOC control settings
@@ -261,23 +261,18 @@ function determineDeviceIdentity(callback) {
     "Shelly.GetDeviceInfo",
     {},
     function(result, error_code, error_message) {
-      if (error_code !== 0 || !result || !result.mac) {
+      if (error_code !== 0 || !result || !result.id) {
         console.log("Error getting device info: " + error_message);
-        // Assume we're not the lead relay
         state.isLeadRelay = false;
-        state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
-        if (callback) callback();
-        return;
+      } else {
+        logDebug("Device ID: " + result.id);
+        state.isLeadRelay = (result.id.indexOf(config.leadRelay.deviceId) >= 0);
       }
 
-      logDebug("Device ID: " + result.id);
-
-      if (result.id.indexOf(config.leadRelay.deviceId) >= 0) {
-        state.isLeadRelay = true;
+      if (state.isLeadRelay) {
         console.log("This device IS the lead relay - will use local input");
       } else {
-        state.isLeadRelay = false;
-        state.leadRelayTopic = "shellies/shellyplus1pm-" + config.leadRelay.deviceId + "/status/input:0";
+        state.leadRelayTopic = config.leadRelay.inputTopic;
         console.log("This device is NOT the lead relay - will monitor: " + state.leadRelayTopic);
       }
 
