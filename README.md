@@ -170,7 +170,7 @@ Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom
 
 **Priority System:**
 1. Wait for initial data (avoid acting on stale state)
-2. **Generator suppression** - Turn off all loads if AC source active
+2. **VE.Bus state** - Only allow dumps when VE.Bus is Inverting (state 9)
 3. **Low SOC protection** - Suppress if SOC < target (97% default)
 4. **EV auto mode** - Use normal surplus control when EV charging in auto (prevents oscillation)
 5. **High SOC protection** - Enable dumps if SOC > target (respecting inverter limit, only when no EV auto)

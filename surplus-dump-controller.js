@@ -35,7 +35,7 @@ let config = {
     evChargerStatus: "evcharger/40/Status",       // EV charger status (2=Charging)
     evChargerMode: "evcharger/40/Mode",           // EV charger mode (0=Manual, 1=Auto, 2=Scheduled)
     batterySOC: "system/0/Dc/Battery/Soc",        // Battery SOC (%)
-    acSource: "system/0/Ac/ActiveIn/Source",      // AC source (0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected)
+    vebusState: "vebus/276/State",                 // VE.Bus state (9=Inverting required for dump loads)
     inverterOutput: "vebus/276/Ac/Out/L1/P"       // VE.Bus inverter output power (W)
   },
 
@@ -90,7 +90,7 @@ let state = {
   evChargerStatus: 0,        // 0=Disconnected, 1=Connected, 2=Charging, 3=Charged
   evChargerMode: 0,          // 0=Manual, 1=Auto, 2=Scheduled
   batterySOC: 0,             // Battery state of charge (%)
-  acSource: 240,             // AC source (240 = not connected)
+  vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting)
   inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Calculated values
@@ -163,14 +163,22 @@ function getDumpLoadPower() {
   return total;
 }
 
-// Get AC source string
-function getAcSourceString(source) {
-  if (source === 0) return "Unknown";
-  if (source === 1) return "Grid";
-  if (source === 2) return "Generator";
-  if (source === 3) return "Shore";
-  if (source === 240) return "None";
-  return "Unknown";
+// Get VE.Bus state string
+function getVebusStateString(vebusState) {
+  if (vebusState === 0) return "Off";
+  if (vebusState === 1) return "Low Power";
+  if (vebusState === 2) return "Fault";
+  if (vebusState === 3) return "Bulk";
+  if (vebusState === 4) return "Absorption";
+  if (vebusState === 5) return "Float";
+  if (vebusState === 6) return "Storage";
+  if (vebusState === 7) return "Equalize";
+  if (vebusState === 8) return "Passthru";
+  if (vebusState === 9) return "Inverting";
+  if (vebusState === 10) return "Power Assist";
+  if (vebusState === 11) return "Power Supply";
+  if (vebusState === 252) return "External Control";
+  return "Unknown(" + vebusState + ")";
 }
 
 // Update the status display
@@ -181,8 +189,7 @@ function updateStatus(event) {
   let dcHydroPart = state.dcHydroPower > 0 ? " DC Hydro:" + state.dcHydroPower.toFixed(0) + "W" : "";
   let availPart = " Avail:" + state.availablePower.toFixed(0) + "W";
 
-  let acSourceStr = getAcSourceString(state.acSource);
-  let acPart = " AC:" + acSourceStr;
+  let vePart = " VE:" + getVebusStateString(state.vebusState);
 
   let evPart = "";
   if (state.evChargerStatus === 2) {
@@ -201,7 +208,7 @@ function updateStatus(event) {
 
   let eventPart = event ? " - " + event : "";
 
-  let statusMessage = modePart + socPart + solarPart + dcHydroPart + availPart + acPart + evPart + dumpPart + loadsPart + eventPart;
+  let statusMessage = modePart + socPart + solarPart + dcHydroPart + availPart + vePart + evPart + dumpPart + loadsPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -397,10 +404,10 @@ function processMqttMessage(topic, message) {
       state.batterySOC = parseFloat(payload.value);
     }
 
-    // Update AC source
-    if (relativeTopic === config.victron.acSource) {
-      state.acSource = parseInt(payload.value);
-      logDebug("AC source updated: " + state.acSource + " (" + getAcSourceString(state.acSource) + ")");
+    // Update VE.Bus state
+    if (relativeTopic === config.victron.vebusState) {
+      state.vebusState = parseInt(payload.value);
+      logDebug("VE.Bus state updated: " + state.vebusState + " (" + getVebusStateString(state.vebusState) + ")");
     }
 
     // Update inverter output - with fast-path emergency suppression
@@ -500,7 +507,7 @@ function resetMqttData() {
   state.evChargerStatus = 0;
   state.evChargerMode = 0;
   state.batterySOC = 0;
-  state.acSource = 240; // Not connected
+  state.vebusState = 0; // Off
   state.inverterOutput = 0;
 
   for (let i = 0; i < state.remoteSwitches.length; i++) {
@@ -933,12 +940,13 @@ function checkSystemState() {
     }
   }
 
-  // PRIORITY 1: Generator suppression
-  // If generator (or any AC source other than "not connected") is active, turn off all loads
-  if (state.acSource !== 240) {
-    logDebug("AC source active (" + getAcSourceString(state.acSource) + "), suppressing all dump loads");
-    suppressAllLoads("Generator/AC active");
-    updateStatus("Generator active");
+  // PRIORITY 1: VE.Bus state check
+  // Only allow dumps when inverter is in Inverting mode (state 9)
+  // Covers: Off, Fault, Passthru (generator), Power Assist, Bulk/Absorption/Float (charging)
+  if (state.vebusState !== 9) {
+    logDebug("VE.Bus not inverting (" + getVebusStateString(state.vebusState) + "), suppressing all dump loads");
+    suppressAllLoads("VE.Bus " + getVebusStateString(state.vebusState));
+    updateStatus("VE " + getVebusStateString(state.vebusState));
     return;
   }
 
