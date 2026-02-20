@@ -34,9 +34,15 @@ let config = {
   minOnTime: 10 * 60 * 1000, // 10 minutes in milliseconds
   checkInterval: 30 * 1000,  // 30 seconds in milliseconds
 
+  // Minimum generation required to enable dump loads (W)
+  // Prevents enabling with no generation (e.g. post-outage, nighttime)
+  minGenerationPower: 500,
+
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
     batterySOC: "system/0/Dc/Battery/Soc",
+    acGeneration: "system/0/Ac/PvOnOutput/L1/Power",  // AC-coupled generation (solar + AC hydro) (W)
+    dcGeneration: "dcsource/279/Dc/0/Power",           // DC-coupled hydro turbine power (W)
     acSource: "system/0/Ac/ActiveIn/Source", // 0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected
     inverterOutput: "vebus/276/Ac/Out/L1/P"  // VE.Bus inverter output power (W)
   },
@@ -71,6 +77,8 @@ let state = {
 
   // Victron data
   currentSoc: 0,             // Current SOC from Victron
+  acGeneration: 0,           // AC-coupled generation power (W)
+  dcGeneration: 0,           // DC-coupled generation power (W)
   acInputConnected: false,   // Current AC input status from Victron
   inverterOutput: 0,         // VE.Bus inverter output power (W)
 
@@ -113,6 +121,8 @@ function updateStatus(event) {
   let thresholdInfo = " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
 
   let relayPart = state.relayIsOn ? "Relay ON" : "Relay OFF";
+  let totalGen = state.acGeneration + state.dcGeneration;
+  let genPart = ", Gen " + totalGen.toFixed(0) + "W";
   let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
 
   let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
@@ -121,7 +131,7 @@ function updateStatus(event) {
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = socPart + thresholdInfo + ", " + relayPart + inverterPart + inputPart + leadPart + acPart + eventPart;
+  let statusMessage = socPart + thresholdInfo + ", " + relayPart + genPart + inverterPart + inputPart + leadPart + acPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -412,6 +422,16 @@ function processMqttMessage(topic, message) {
       state.currentSoc = parseFloat(payload.value);
     }
 
+    // Update AC-coupled generation
+    if (relativeTopic === config.topics.acGeneration) {
+      state.acGeneration = parseFloat(payload.value);
+    }
+
+    // Update DC-coupled generation
+    if (relativeTopic === config.topics.dcGeneration) {
+      state.dcGeneration = parseFloat(payload.value);
+    }
+
     // Update AC input status
     if (relativeTopic === config.topics.acSource) {
       // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore; 240=Not connected
@@ -490,6 +510,8 @@ function sendKeepalive(suppressRepublish) {
 
 function resetMqttData() {
   state.currentSoc = 0;
+  state.acGeneration = 0;
+  state.dcGeneration = 0;
   state.acInputConnected = false;
   state.inverterOutput = 0;
   if (!state.isLeadRelay) {
@@ -717,11 +739,16 @@ function checkSystemState() {
   let currentTime = Date.now();
   let timeElapsed = currentTime - state.lastSwitchedOnTime;
 
-  logDebug("SOC control: Current=" + state.currentSoc + "%, High=" + state.highSocThreshold + "%, Low=" + state.lowSocThreshold + "%");
+  let totalGeneration = state.acGeneration + state.dcGeneration;
+  let sufficientGeneration = totalGeneration >= config.minGenerationPower;
 
-  // Turn on when SOC reaches high threshold (with inverter headroom check)
-  if (state.currentSoc >= state.highSocThreshold && !state.relayIsOn && canSafelyEnable()) {
-    turnRelayOn("SOC high: " + state.currentSoc + "% >= " + state.highSocThreshold + "%");
+  logDebug("SOC control: Current=" + state.currentSoc + "%, High=" + state.highSocThreshold +
+          "%, Low=" + state.lowSocThreshold + "%, Gen=" + totalGeneration.toFixed(0) + "W" +
+          " (need >=" + config.minGenerationPower + "W to enable)");
+
+  // Turn on when SOC reaches high threshold AND sufficient generation is available
+  if (state.currentSoc >= state.highSocThreshold && !state.relayIsOn && sufficientGeneration && canSafelyEnable()) {
+    turnRelayOn("SOC high + gen: " + state.currentSoc + "% >= " + state.highSocThreshold + "%, gen " + totalGeneration.toFixed(0) + "W");
   }
   // Turn off when SOC reaches low threshold (and minimum on time elapsed)
   else if (state.currentSoc <= state.lowSocThreshold && state.relayIsOn && timeElapsed >= config.minOnTime) {

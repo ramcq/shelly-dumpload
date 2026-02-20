@@ -11,7 +11,7 @@ These scripts are designed to work with:
 
 Developed for an off-grid system with Victron Quattro inverters, a Cerbo GX, AC-coupled solar and hydro generation, DC-coupled hydro, and multiple resistive dump loads (immersion heaters). The scripts should be adaptable to other Victron-based systems with similar topology.
 
-**Overload Risk:** The surplus-dump-controller enforces an inverter contribution limit for its own loads. The dump-load-controller instances have inverter headroom checks, but operate independently. When multiple dump loads are active simultaneously with high generation that then drops away (e.g., hydro trip), the combined load plus house consumption can exceed inverter capacity until loads cycle off via SOC hysteresis.
+**Overload Risk:** The surplus-dump-controller enforces an inverter contribution limit for its own loads. The dump-load-controller instances have a generation gate (won't enable without sufficient generation) and inverter headroom checks, but operate independently. When multiple dump loads are active simultaneously with high generation that then drops away (e.g., hydro trip), the combined load plus house consumption can exceed inverter capacity until loads cycle off via SOC hysteresis.
 
 ### Power Flow Architecture
 
@@ -111,7 +111,14 @@ Simplified dump load controller with multi-device coordination. One device acts 
 1. **Local input** - Manual override (with inverter headroom check before enabling)
 2. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
 3. **AC input check** - Suppress if grid/generator connected
-4. **SOC control** - Normal automatic operation (with headroom checks before enabling)
+4. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
+
+**Generation Gate:**
+- Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
+- Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
+- Naturally self-staggers multiple dump loads: each load coming on reduces battery charging rate, and only enables when its SOC threshold is met with sufficient generation
+- Turn-off is still purely SOC-based (low threshold + minimum on time) — generation dropping away mid-cycle doesn't force immediate shutoff, avoiding rapid cycling
+- Configurable via `config.minGenerationPower`
 
 **Inverter Overload Protection:**
 - Fast-path emergency suppression on MQTT receipt if inverter output exceeds 13kW
