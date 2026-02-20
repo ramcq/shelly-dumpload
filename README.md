@@ -110,7 +110,7 @@ Simplified dump load controller with multi-device coordination. One device acts 
 0. **Inverter overload** - Emergency suppression if inverter output exceeds limit (overrides all)
 1. **Local input** - Manual override (with inverter headroom check before enabling)
 2. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
-3. **AC input check** - Suppress if grid/generator connected
+3. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed
 4. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
 
 **Generation Gate:**
@@ -336,7 +336,7 @@ wget -qO- http://192.168.1.156/rpc/Text.GetStatus?id=200
 
 Example output:
 ```
-{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, Input OFF, Lead OFF, AC-In OFF: Monitoring","source":"sys","last_update_ts":1771542699}
+{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, VE Inverting, Lead OFF: Monitoring","source":"sys","last_update_ts":1771542699}
 ```
 
 ---

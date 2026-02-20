@@ -43,8 +43,8 @@ let config = {
     batterySOC: "system/0/Dc/Battery/Soc",
     acGeneration: "system/0/Ac/PvOnOutput/L1/Power",  // AC-coupled generation (solar + AC hydro) (W)
     dcGeneration: "dcsource/279/Dc/0/Power",           // DC-coupled hydro turbine power (W)
-    acSource: "system/0/Ac/ActiveIn/Source", // 0=Unknown;1=Grid;2=Generator;3=Shore;240=Not connected
-    inverterOutput: "vebus/276/Ac/Out/L1/P"  // VE.Bus inverter output power (W)
+    vebusState: "vebus/276/State",                     // VE.Bus state (9=Inverting is the only active state for dump loads)
+    inverterOutput: "vebus/276/Ac/Out/L1/P"            // VE.Bus inverter output power (W)
   },
 
   // Virtual component IDs (matches smart-load-controller.js for drop-in replacement)
@@ -79,7 +79,7 @@ let state = {
   currentSoc: 0,             // Current SOC from Victron
   acGeneration: 0,           // AC-coupled generation power (W)
   dcGeneration: 0,           // DC-coupled generation power (W)
-  acInputConnected: false,   // Current AC input status from Victron
+  vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting, etc.)
   inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Lead relay state
@@ -115,6 +115,23 @@ function arrayContains(array, value) {
   return false;
 }
 
+function getVebusStateString(vebusState) {
+  if (vebusState === 0) return "Off";
+  if (vebusState === 1) return "Low Power";
+  if (vebusState === 2) return "Fault";
+  if (vebusState === 3) return "Bulk";
+  if (vebusState === 4) return "Absorption";
+  if (vebusState === 5) return "Float";
+  if (vebusState === 6) return "Storage";
+  if (vebusState === 7) return "Equalize";
+  if (vebusState === 8) return "Passthru";
+  if (vebusState === 9) return "Inverting";
+  if (vebusState === 10) return "Power Assist";
+  if (vebusState === 11) return "Power Supply";
+  if (vebusState === 252) return "External Control";
+  return "Unknown(" + vebusState + ")";
+}
+
 // Update the status display
 function updateStatus(event) {
   let socPart = state.currentSoc > 0 ? state.currentSoc + "%" : "No SOC";
@@ -125,13 +142,13 @@ function updateStatus(event) {
   let genPart = ", Gen " + totalGen.toFixed(0) + "W";
   let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
 
+  let vebusPart = ", VE " + getVebusStateString(state.vebusState);
   let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
   let leadPart = !state.isLeadRelay ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
-  let acPart = ", AC-In " + (state.acInputConnected ? "ON" : "OFF");
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = socPart + thresholdInfo + ", " + relayPart + genPart + inverterPart + inputPart + leadPart + acPart + eventPart;
+  let statusMessage = socPart + thresholdInfo + ", " + relayPart + genPart + inverterPart + vebusPart + inputPart + leadPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -432,14 +449,13 @@ function processMqttMessage(topic, message) {
       state.dcGeneration = parseFloat(payload.value);
     }
 
-    // Update AC input status
-    if (relativeTopic === config.topics.acSource) {
-      // AC Source: 0=Unknown; 1=Grid; 2=Generator; 3=Shore; 240=Not connected
-      let wasConnected = state.acInputConnected;
-      state.acInputConnected = (payload.value !== 240);
-      // Only log on state change
-      if (wasConnected !== state.acInputConnected) {
-        console.log("AC input " + (state.acInputConnected ? "connected" : "disconnected"));
+    // Update VE.Bus state
+    if (relativeTopic === config.topics.vebusState) {
+      let prevState = state.vebusState;
+      state.vebusState = parseInt(payload.value);
+      // Log on state change
+      if (prevState !== state.vebusState) {
+        console.log("VE.Bus state: " + state.vebusState + " (" + getVebusStateString(state.vebusState) + ")");
       }
     }
 
@@ -512,7 +528,7 @@ function resetMqttData() {
   state.currentSoc = 0;
   state.acGeneration = 0;
   state.dcGeneration = 0;
-  state.acInputConnected = false;
+  state.vebusState = 0;
   state.inverterOutput = 0;
   if (!state.isLeadRelay) {
     state.leadInputActive = false;
@@ -719,13 +735,14 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 3: AC input check
-  // If AC input is connected, turn off dump load
-  if (state.acInputConnected) {
+  // PRIORITY 3: VE.Bus state check
+  // Only allow dump loads when VE.Bus is Inverting (state 9)
+  // This covers: inverter off, inverter faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/PowerAssist)
+  if (state.vebusState !== 9) {
     if (state.relayIsOn) {
-      turnRelayOff("AC input connected");
+      turnRelayOff("VE.Bus " + getVebusStateString(state.vebusState));
     } else {
-      logDebug("AC input connected - no control action");
+      logDebug("VE.Bus not inverting (" + getVebusStateString(state.vebusState) + ") - no action");
     }
     return;
   }
