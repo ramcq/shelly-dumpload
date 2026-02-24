@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 Robert McQueen
+//
 // Surplus Dump Load Controller for Shelly Pro 0/1-10V Dimmer
 // Monitors Victron energy and controls three 2.69kW dump loads:
 // - Local dimmer output (SSR controlled via 0-10V)

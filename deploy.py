@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Robert McQueen
 """
 Shelly Script Deployment Tool
 Uploads JavaScript scripts to multiple Shelly devices via HTTP API

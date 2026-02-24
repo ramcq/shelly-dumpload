@@ -343,7 +343,7 @@ Example output:
 
 ## License
 
-These scripts are provided as-is for educational and personal use.
+MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 

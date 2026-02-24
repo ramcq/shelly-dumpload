@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 Robert McQueen
+//
 // Thermal Dump Controller for Shelly 2 PM Gen3
 // Controls pump (output 1) and fan coil (output 0) based on:
 // 1. Frost thermostat input (unconditional)

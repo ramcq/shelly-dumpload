@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 Robert McQueen
+//
 // Simplified Dump Load Controller for Shelly 1PM Gen3
 // Controls relay based on battery SOC from Victron Cerbo GX via MQTT
 // Also monitors a "lead" relay's input state (manual time switch) to coordinate multiple relays
