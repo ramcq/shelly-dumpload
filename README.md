@@ -9,6 +9,10 @@ These scripts are designed to work with:
 - **Shelly devices** - Execute control scripts and switch dump loads
 - **MQTT** - Communication between Cerbo GX and Shelly devices
 
+Developed for an off-grid system with Victron Quattro inverters, a Cerbo GX, AC-coupled solar and hydro generation, DC-coupled hydro, and multiple resistive dump loads (immersion heaters). The scripts should be adaptable to other Victron-based systems with similar topology.
+
+**Overload Risk:** The surplus-dump-controller enforces an inverter contribution limit for its own loads. The dump-load-controller instances have inverter headroom checks, but operate independently. When multiple dump loads are active simultaneously with high generation that then drops away (e.g., hydro trip), the combined load plus house consumption can exceed inverter capacity until loads cycle off via SOC hysteresis.
+
 ### Power Flow Architecture
 
 Understanding the power flow is critical for safe operation:
@@ -42,7 +46,7 @@ DC-coupled sources (like the DC hydro turbine) add power but go through the inve
 **Generator/AC Hydro Interactions:**
 - Diesel generators can knock AC-coupled hydro generators offline when they start (frequency/voltage mismatch)
 - Always verify AC hydro has restarted after diesel generator test runs or power events
-- Monitor PV Inverter [33] power output to confirm AC hydro operation
+- Monitor AC-coupled generator power output to confirm operation
 - DC-coupled hydro is not affected by generator starts as it's on the battery side
 
 ## Quick Start / Deployment
@@ -246,6 +250,7 @@ Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom
 - In high SOC mode, only enables dump loads that fit within available inverter capacity
 - Prevents overload when house loads (cooking, immersions, etc.) are already high
 - Configurable via `config.dumpLoad.maxInverterContribution` (default: 12000W)
+- Fast-path emergency shutoff at 13kW inverter output (configurable via `emergencyInverterLimit`)
 
 **EVSE Coordination:**
 - Reserves headroom when EV charger in auto mode
@@ -387,10 +392,29 @@ debugMode: true  // or config.debugMode = true
 ```
 
 Debug messages appear in Shelly console with prefixes:
+- `[DEBUG-DUMP]` - dump-load-controller.js
 - `[DEBUG-SURPLUS]` - surplus-dump-controller.js
 - `[DEBUG-THERMAL]` - thermal-dump-controller.js
-- `[DEBUG-CERBO]` - victron-mqtt.js
-- `[DEBUG]` - other controllers
+
+### Quick Status Check
+
+Each controller writes a status summary to a virtual text component. You can fetch it directly via HTTP:
+
+```bash
+# dump-load-controller (text:204)
+wget -qO- http://192.168.1.88/rpc/Text.GetStatus?id=204
+
+# surplus-dump-controller (text:200)
+wget -qO- http://192.168.1.251/rpc/Text.GetStatus?id=200
+
+# thermal-dump-controller (text:200)
+wget -qO- http://192.168.1.156/rpc/Text.GetStatus?id=200
+```
+
+Example output:
+```
+{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, Input OFF, Lead OFF, AC-In OFF: Monitoring","source":"sys","last_update_ts":1771542699}
+```
 
 ---
 
