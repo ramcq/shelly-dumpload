@@ -132,7 +132,7 @@ The canonical list. Correct it here and nowhere else.
 | `evcharger/40` | EV charging station | Modbus TCP |
 | `generator/0` | Generator start/stop | See above |
 | `tank/20`, `/21` | Diesel, water | |
-| `temperature/100`, `/101` | Buffer top, buffer bottom | From `dbus-froeling` |
+| `temperature/100`, `/101`, `/103` | Buffer top, buffer bottom, boiler flow | From `dbus-froeling` |
 | `digitalinput/102` | Boiler operating contact | `FurnaceStatus`, from `dbus-froeling` |
 
 Every Shelly is registered with `dbus-shelly-local`. Two-channel devices take one instance

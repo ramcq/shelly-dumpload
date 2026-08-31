@@ -78,8 +78,9 @@ contacts are the running state, so the heat pump is locked by the *absence* of a
 _Avoid_: Disable, switch off, stop the heat pump
 
 **DHW demand**:
-A request for hot water — the time clock calling, or the opportunity created by heat
-already stored in the buffer. A reason to want heat moved.
+A request for hot water: the time clock calling, whether that is the physical clock or a
+window synthesised in its place. A reason to want heat moved, and therefore a reason to
+release the biomass.
 _Avoid_: DHW call, hot water request
 
 **DHW enable**:
@@ -87,6 +88,14 @@ Permission for heat to move from the buffer into the cylinders. Distinct from DH
 demand asks, enable permits, and the cylinder thermostats decide whether anything
 actually happens.
 _Avoid_: DHW on, hot water enable
+
+**Shortage DHW window**:
+A bounded period, during shortage only, in which the controller closes the DHW enable in
+place of the time clock the user would otherwise flip by hand. Bounded because the point
+is not only to make hot water but to stop making it, so DHW cannot run on indefinitely
+against space heating. It is not DHW demand: it permits heat to move and asks for none,
+so it releases nothing.
+_Avoid_: Opportunistic enable, DHW schedule, synthetic timer
 
 **Lead relay**:
 The one device in a coordinated group that owns a decision and expresses it, which the

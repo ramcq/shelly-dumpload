@@ -138,7 +138,7 @@ the right answer anyway: someone has declared the site short of power.
 | DHW immersions (`dump-load-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
 | Buffer immersions (`surplus-dump-controller.js`) | Surplus tracking across three constant stages and the dimmer |
 | Boiler Release (.164) | Released on sustained shortage, **or** H1, **or** DHW demand, **or** exercise |
-| DHW Enable (.123) | Timer **or** opportunistic; never a function of shortage |
+| DHW Enable (.123) | The time clock, unconditionally; **or** a shortage DHW window |
 
 The biomass and the heat pump are inverses **only on the shortage term**. The Grant's H1
 back-up heater request must stay independent: that is the winter bivalent, where at −1 °C the
@@ -210,28 +210,45 @@ DHW Enable closes when **either**:
   broken, because it is the user physically asking for hot water. In normal operation the
   timer is off; it exists so it can be flipped to timed or permanent-on and behave as
   expected, making hot water with the biomass.
-- **Opportunistically**, when heat is already there: **buffer top ≥ 65 °C or boiler flow
-  ≥ 65 °C**, for a fixed **90 minutes**. The cylinders take surplus heat out of the buffer
-  whether it came from the buffer immersions or from the boiler, with no scheduling and no
-  arbitration.
+- **A shortage DHW window is open.** In shortage the heat pump is locked and the immersion
+  time switch is blocked, so the buffer is the only route to hot water. The controller runs
+  the time clock the user would otherwise turn on by hand.
 
-The opportunistic period is edge-triggered, not a level. It re-arms only once the gate has
-fallen below 58 °C and risen again, or after 6 hours — so a persistently hot buffer gives
-four opportunities a day and a single burn gives one clean run. Left as a level it would hold
-the enable closed indefinitely, and every time a cylinder drifted from 60 back to 55 °C the
-zone valve, the cylinder pump and the heat loop pump would all run again. That last one
-matters: the heat loop pump mixes the buffer, and stratification is what
-`thermal-dump-controller.js` relies on to recover the immersions from thermal cutout.
+**Windows are one hour in six** — 05:00, 11:00, 17:00, 23:00, plus one on entering shortage.
+Fixed times need no anchor to persist and survive a reboot; the entry window stops a shortage
+beginning at 07:30 from waiting until noon. One in six rather than the two in twelve the
+physical clock would use, because a window need not finish a charge: a partial one resumes six
+hours later, and the annex cylinder is small enough that one shower empties it.
 
-Both temperatures are needed because they fail in opposite directions. Buffer top measures
-the energy actually stored and is the only signal that sees the immersion case, but it lags
-ignition by 10–15 minutes. Boiler flow (Fröling register `30001`) is the earliest honest
-signal and matches the hydraulics — flow reaches the house loop before the buffer charges,
-since there is a pump pulling — but it goes cold the moment the boiler stops, even with 1500
-litres of heat behind it.
+**Buffer temperature guards the window; it does not trigger it.** The cylinder stats know
+nothing about the primary side, so a window on a cold buffer would circulate through the coils
+and strip heat back out of the cylinders. A window therefore requires **buffer top or boiler
+flow ≥ 60 °C**, whichever is higher. Both are needed: buffer top measures the energy actually
+stored but lags ignition by 10–15 minutes, while boiler flow (Fröling register `30001`,
+reaching Victron as `temperature/103`) is the earliest honest signal and matches the
+hydraulics, but cools when the boiler stops even with 1500 litres of heat in the buffer.
 
-A DHW demand also releases the biomass, unconditionally. If the buffer is already hot the
-boiler does nothing with the release, which is the boiler's decision to make.
+**A window is a slot, not a start time.** The guard is checked throughout the hour, so a
+boiler that lifts the buffer past 60 °C at 05:20 still gets a window. Once the enable has
+closed within a slot it stays closed until the slot ends: otherwise a burn finishing
+mid-window slams the zone valves shut, and a buffer hovering at 60 °C cycles three actuators.
+That is one flag in RAM, cleared with the hour — no timer, no re-arm threshold, no hysteresis.
+A late guard gets a short run, which is accepted.
+
+**The time clock takes authority.** `Switch.Set` overrides `follow` until the next input edge,
+so the controller reads its own input and never opens the enable while the clock is calling: a
+window expiring at 06:00 must not cancel a request made at 05:30. The clock is unguarded — the
+user asking for hot water is not second-guessed against a buffer reading.
+
+**A DHW demand also releases the biomass, unconditionally — a window does not.** Demand is a
+request for heat the system may not have, and the boiler answers it. A window exists because
+the heat is already there; releasing the boiler on one would be asking for heat on the grounds
+of having some.
+
+**Nothing takes DHW from the buffer outside shortage.** The immersions make the same water
+from the same surplus more directly, and the enable only permits: with the cylinders satisfied
+it moves no energy and merely runs the heat loop pump, mixing the buffer that
+`thermal-dump-controller.js` needs stratified.
 
 Nothing arbitrates between DHW and the heating circuits, since the Grant does not know DHW
 exists. On a marginal buffer, let DHW win: cold water is noticed in hours, a slightly cooler
@@ -263,6 +280,12 @@ current time on first run so a redeploy never triggers a burn.
 
 **No alerting.** The Fröling has its own remote monitoring, which is where boiler faults
 belong. The Shelly scripts get no alerting responsibility at all.
+
+**The DHW Enable cannot tell whether anything happened.** .123 has no metering, and .171 —
+the only device downstream that knows a stat is calling — is not something to depend on. A
+1PM in its place would meter the stat, valve and pump load and so see a completed charge.
+Nothing in the control law wants it: a window ends because the hour ended. Worth fitting for
+diagnostics, not for control.
 
 **The immersions do not watch the boiler.** Tempting to lift the immersion block when the
 boiler fails to deliver, but the hysteresis already handles it: in shortage the heat pump and
