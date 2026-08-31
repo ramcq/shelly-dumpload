@@ -66,6 +66,23 @@ The deployment script:
 5. Configure settings at top of script
 6. Enable and start script
 
+## Tests
+
+```bash
+node --test tests/
+```
+
+No dependencies and no build step — `tests/harness.js` loads a controller under
+stubbed `Shelly`, `MQTT`, `Timer` and `Virtual` globals and exports its internals, so
+the decision logic can be exercised without a device. `Shelly.call` never calls back,
+so the script's own `init()` stalls after the first RPC and starts no timers.
+
+What they cover is the failures that are expensive on live plant rather than merely wrong:
+which device and channel a stage actually commands, the
+[subscription budget](#mqtt-subscription-budget), and
+[initialisation](#seeding-state-from-other-devices) — the last two because both fail by
+stopping the whole controller, not just the stage being changed.
+
 ## Scripts Overview
 
 ### dump-load-controller.js
@@ -117,10 +134,15 @@ Simplified dump load controller with multi-device coordination. One device acts 
 **Device:** Shelly Pro 0/1-10V Dimmer PM
 **Purpose:** Intelligent surplus power management across multiple dump loads
 
-Advanced controller managing three 2.69kW dump loads to consume excess generation:
-- **Local dimmer output** - 0-10V controlled SSR (variable 0-100%)
-- **Remote Switch 0** - Shelly Pro 2PM via MQTT RPC (ON/OFF)
-- **Remote Switch 1** - Shelly Pro 2PM via MQTT RPC (ON/OFF)
+Advanced controller managing four 2.69kW dump loads to consume excess generation:
+- **Local dimmer output** - 0-10V controlled SSR (variable 0-100%), buffer immersion 3
+- **Remote Switch 0** - Shelly Pro 2PM switch 0 via MQTT RPC (ON/OFF), buffer immersion 1
+- **Remote Switch 1** - Shelly Pro 2PM switch 1 via MQTT RPC (ON/OFF), buffer immersion 2
+- **Remote Switch 2** - Shelly Pro 1PM switch 0 via MQTT RPC (ON/OFF), buffer immersion 4
+
+Each remote stage names its own device and channel, so the constant stages need not
+share a Shelly. The position in the list is the allocation order and is not the switch
+id on the device.
 
 **Power Sources:**
 - AC-coupled generation (solar + AC hydro) - reported as "Solar" by Victron
@@ -248,6 +270,32 @@ Most controllers enforce minimum on-time (typically 10 minutes) to:
 - Prevent rapid cycling
 - Reduce relay wear
 - Allow loads to stabilize
+
+### MQTT Subscription Budget
+A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions`
+and the script does not run at all, so overrunning the cap takes out every load that
+controller owns, not just the one being added. Count before adding a topic.
+
+Two ways to stay under it, both used by `surplus-dump-controller.js`:
+- **Subscribe to a subtree** where a service needs several paths — `evcharger/40/#` is one
+  subscription instead of three, and messages are still matched against the exact paths.
+- **One wildcard per device**, not per switch — `<device-id>/status/+` covers every channel
+  on that device, so stages sharing a Shelly cost one subscription between them.
+
+### Seeding State From Other Devices
+Shelly publishes status on change and does not retain it (see [POWER.md](POWER.md)), so a
+controller that follows another device starts blind and a device that has not switched
+recently may stay silent for a long time.
+
+`surplus-dump-controller.js` waits for every remote stage to report before it controls
+anything, so that it does not disturb loads already running — but that wait is bounded by
+`statusSeedTimeout`. Past it, silent stages are assumed off and the rest are controlled
+anyway; otherwise one idle immersion holds every other load off. Commanding a stage into the
+position it is already in is a no-op, so guessing wrong is cheap. The bound is re-armed on
+every broker reconnect, which clears the received flags.
+
+This is a floor, not a substitute for seeding: an HTTP `Switch.GetStatus` per device at
+startup would be better and is what the newer controllers are specified to do.
 
 ---
 

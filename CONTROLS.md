@@ -136,7 +136,7 @@ the right answer anyway: someone has declared the site short of power.
 |---|---|
 | Heat Pump Enable (.209) | Closed unless in shortage; 30-minute minimum lock |
 | DHW immersions (`dump-load-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
-| Buffer immersions (`surplus-dump-controller.js`) | Unchanged surplus tracking; immersion 4 joins as a third constant stage |
+| Buffer immersions (`surplus-dump-controller.js`) | Surplus tracking across three constant stages and the dimmer |
 | Boiler Release (.164) | Released on sustained shortage, **or** H1, **or** DHW demand, **or** exercise |
 | DHW Enable (.123) | Timer **or** opportunistic; never a function of shortage |
 
@@ -172,7 +172,8 @@ cycling. The lead relay (.90) carries a manual time switch on its input for inte
 heating; the others follow it over MQTT.
 
 **Buffer immersions** — `surplus-dump-controller.js` on the dimmer allocates surplus
-sequentially across the two Pro 2PM channels and its own 0–10 V stage, using *intended*
+sequentially across the two Pro 2PM channels, the Pro 1PM carrying immersion 4, and its
+own 0–10 V stage, using *intended*
 rather than measured dump power to avoid feedback loops, with 150 W hysteresis and a 12 kW
 inverter contribution limit. Above 97% SOC it enables loads regardless of measured surplus.
 It reserves headroom for the EVSE when the EV charger is in auto mode rather than fighting the
@@ -283,6 +284,28 @@ are real and the shed is free.
 
 ---
 
+## Relay configuration
+
+Each relay's *unscripted* behaviour should be whatever is sensible with no script running, so
+that a stopped script or a fresh boot degrades predictably rather than to whatever the factory
+default happens to be. For a relay inserted into existing controls, sensible means the
+behaviour the system had before the Shelly was there. For a dump load, which exists only to
+absorb surplus and has no prior behaviour to preserve, it means off.
+
+| Relay | Configuration | Unscripted behaviour |
+|---|---|---|
+| Heat Pump Enable (.209) | `detached`, `initial_state: "on"` | Heat pump runs. Nothing is wired to its input, so `match_input` would lock the heat pump out on every power cycle |
+| Boiler Release (.164) | `follow`, `match_input` | H1 releases the boiler in hardware — the bivalent survives a dead script, which matters because the relay is normally-open and cannot be rewired for a changeover contact |
+| DHW Enable (.123) | `follow`, `match_input` | The time clock passes straight through, exactly as before the Shelly existed |
+| Buffer immersions (.65, .161) | `detached`, `initial_state: "off"` | Nothing dumps. `follow` would let an input edge override the controller, and 2.69 kW should not latch on at boot with no surplus behind it and no script yet running |
+| DHW immersions (.88 .91 .100) | `detached`, `initial_state: "off"` | Nothing heats until a controller says so |
+| DHW immersion lead relay (.90) | `follow`, `match_input` | The manual time switch still makes hot water with no script running at all |
+
+A `Switch.Set` overrides `follow` until the next input edge, so a script can hold .164, .123
+or the lead relay closed for its own reasons without giving up the hardware path.
+
+---
+
 ## Implementation plan
 
 | Script | Device | Derived from | Job |
@@ -291,7 +314,18 @@ are real and the shed is free.
 | `dump-load-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage |
 | `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run |
 | `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Timer or opportunistic enable; it already subscribes to buffer temperatures and boiler status |
-| `surplus-dump-controller.js` | .251 | existing | Buffer immersion 4 (.65) as a third constant stage over RPC |
+| `thermal-dump-controller.js` | .156 | existing | Watch buffer immersion 4 (.65) for thermal cutout alongside the other three stages |
+
+Immersion 4 is switched by `surplus-dump-controller.js` but is not yet watched by
+`thermal-dump-controller.js`, whose `dumpLoads` still lists only the two Pro 2PM channels
+and the dimmer. Until it is, immersion 4 reaching its thermal cutout does not call for the
+fan coil and circulation pump, so the buffer is not stirred and the immersion stays stalled
+until something else trips. The surplus controller already keeps a stalled stage nominally
+on without charging it against the surplus budget, so the load is not double-counted — the
+gap is only in heat recovery. One entry in `config.dumpLoads` for
+`shellypro1pm-5c013b056870/status/switch:0` closes it, and that device publishes on the
+same status topic shape as the others.
+
 
 .209 runs the same file as the four DHW immersions. Structurally it is the same controller —
 relay on above a high SOC threshold, off below a low one, gated on VE.Bus state, with a
@@ -314,24 +348,11 @@ follows at startup: .164 and the four DHW immersions against .209, and the DHW i
 against the lead relay's input. Without it, a controller restarting mid-shortage would
 assume no shortage until the next transition.
 
-Shelly scripts are limited in how many MQTT subscriptions they can hold, so the topic sets
-stay deliberately small — the existing controllers run five or six each. Defining shortage on
-VE.Bus state rather than on the generator service is part of what keeps them there.
-
-### Relay configuration
-
-Each relay's *unscripted* behaviour should be the behaviour the system had before the Shelly
-was inserted, so that a stopped script or a fresh boot degrades to something sensible rather
-than to whatever the factory default happens to be.
-
-| Relay | Configuration | Unscripted behaviour |
-|---|---|---|
-| Heat Pump Enable (.209) | `detached`, `initial_state: "on"` | Heat pump runs. Nothing is wired to its input, so `match_input` would lock the heat pump out on every power cycle |
-| Boiler Release (.164) | `follow`, `match_input` | H1 releases the boiler in hardware — the bivalent survives a dead script, which matters because the relay is normally-open and cannot be rewired for a changeover contact |
-| DHW Enable (.123) | `follow`, `match_input` | The time clock passes straight through, exactly as before the Shelly existed |
-
-A `Switch.Set` overrides `follow` until the next input edge, so a script can hold .164 or
-.123 closed for its own reasons without giving up the hardware path.
+Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
+rather than degrading it — see [README.md](README.md) for the number and how to stay under
+it. So the topic sets stay deliberately small: the existing controllers run five or six each.
+Defining shortage on VE.Bus state rather than on the generator service is part of what keeps
+the heating relays clear of it.
 
 ### Prerequisites
 
