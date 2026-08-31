@@ -180,7 +180,8 @@ rads are on Danfoss TRVs.
 Normally direct electric immersion off surplus — the DHW immersions, which are dump loads
 whenever surplus is available and intentional water heating whenever the time switch says
 so. Indirect DHW from the buffer is the fallback when power is short and the biomass is
-running, and the opportunistic case whenever the buffer is hot for any reason at all.
+running, on windows the controller opens in place of the time clock. There is no case for
+taking DHW from the buffer while the immersions can do it.
 
 The entire DHW system is powered from the house DB. One time clock feeds three cylinder stats (2 house, 1 annex) via the DHW Enable relay.
 Each stat directly powers its relevant (one in annex, one in house) pump and zone valve; the zone valve end switch powers a relay in the atrium — the Shelly 1 Mini at 192.168.1.171,
