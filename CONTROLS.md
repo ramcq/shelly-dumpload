@@ -314,18 +314,6 @@ or the lead relay closed for its own reasons without giving up the hardware path
 | `dump-load-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage |
 | `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run |
 | `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Timer or opportunistic enable; it already subscribes to buffer temperatures and boiler status |
-| `thermal-dump-controller.js` | .156 | existing | Watch buffer immersion 4 (.65) for thermal cutout alongside the other three stages |
-
-Immersion 4 is switched by `surplus-dump-controller.js` but is not yet watched by
-`thermal-dump-controller.js`, whose `dumpLoads` still lists only the two Pro 2PM channels
-and the dimmer. Until it is, immersion 4 reaching its thermal cutout does not call for the
-fan coil and circulation pump, so the buffer is not stirred and the immersion stays stalled
-until something else trips. The surplus controller already keeps a stalled stage nominally
-on without charging it against the surplus budget, so the load is not double-counted — the
-gap is only in heat recovery. One entry in `config.dumpLoads` for
-`shellypro1pm-5c013b056870/status/switch:0` closes it, and that device publishes on the
-same status topic shape as the others.
-
 
 .209 runs the same file as the four DHW immersions. Structurally it is the same controller —
 relay on above a high SOC threshold, off below a low one, gated on VE.Bus state, with a

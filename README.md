@@ -208,12 +208,15 @@ Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom
 **Device:** Shelly 2PM Gen3
 **Purpose:** Thermal dump heat recovery from solar dump loads
 
-Monitors three separate dump loads (via MQTT) for thermal cutout condition, then activates thermal dump outputs to recover waste heat from hot water tank.
+Monitors each dump load (via MQTT) for thermal cutout condition, then activates thermal dump outputs to recover waste heat from hot water tank.
 
-**Monitored Dump Loads:**
-- Shelly Pro 2PM - Switch 0
-- Shelly Pro 2PM - Switch 1
-- Shelly Pro Dimmer 0-10V PM - Light output
+**Monitored Dump Loads:** one per buffer immersion, matching the stages
+`surplus-dump-controller.js` can switch. An immersion that is switchable but not listed
+here reaches its thermal cutout with nothing to recover it.
+- Shelly Pro 2PM - Switch 0 (buffer immersion 1)
+- Shelly Pro 2PM - Switch 1 (buffer immersion 2)
+- Shelly Pro Dimmer 0-10V PM - Light output (buffer immersion 3)
+- Shelly Pro 1PM - Switch 0 (buffer immersion 4)
 
 **Controlled Outputs:**
 - **Output 0** - Fan coil (heating from tank)

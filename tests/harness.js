@@ -15,22 +15,37 @@ const path = require("path");
 
 const REPO_ROOT = path.join(__dirname, "..");
 
-// Names exported from the loaded script. Anything not listed here is unreachable
-// from a test, so add to this list rather than reaching into internals.
+// Names exported from a loaded script, across all of them. Each is guarded, so a
+// script that does not define one simply exports undefined for it rather than
+// failing to load. Anything not listed here is unreachable from a test, so add to
+// this list rather than reaching into internals.
 const EXPORTED = [
   "config",
   "state",
+  // surplus-dump-controller
   "calculateDesiredState",
   "suppressAllLoads",
   "applyDesiredState",
   "sendRemoteSwitchCommand",
+  "getDumpLoadPower",
+  // thermal-dump-controller
+  "isLoadStalled",
+  "isDumpLoadStalled",
+  "getDumpLoadState",
+  // common
   "setupMqttSubscriptionsAndKeepalive",
   "processMqttMessage",
-  "getDumpLoadPower",
   "updateStatus",
   "checkSystemState",
   "resetMqttData",
 ];
+
+function exportsLine() {
+  const entries = EXPORTED.map(
+    (name) => name + ": typeof " + name + " !== \"undefined\" ? " + name + " : undefined"
+  );
+  return "\nmodule.exports = { " + entries.join(", ") + " };\n";
+}
 
 let loadCounter = 0;
 
@@ -42,8 +57,7 @@ function load(scriptName) {
   const subscribed = [];
 
   const source =
-    fs.readFileSync(path.join(REPO_ROOT, scriptName), "utf8") +
-    "\nmodule.exports = { " + EXPORTED.join(", ") + " };\n";
+    fs.readFileSync(path.join(REPO_ROOT, scriptName), "utf8") + exportsLine();
 
   const stubs = {
     Shelly: {
