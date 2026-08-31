@@ -97,10 +97,10 @@ DHW immersions in the cylinders are the dual-purpose ones; see [CONTEXT.md](CONT
 |---|---|---|---|
 | 1 and 2 | Shelly Pro 2PM switches 0/1, driven over RPC by `surplus-dump-controller.js` | 192.168.1.161 | Live |
 | 3 | Shelly Pro 0/1-10 V Dimmer PM driving an SSR, variable 0–100% | 192.168.1.251 | Live |
-| 4 | Shelly Pro 1PM (`SPSW-201PE15UL`), to become a third constant stage | 192.168.1.65 | Wired and metered, not yet switched by anything |
+| 4 | Shelly Pro 1PM, the third constant stage, driven over RPC by `surplus-dump-controller.js` | 192.168.1.65 | Live |
 
 Labelled `DUMP IMMERSION 1/2/3` at the isolators in the buffer shed. All four are metered
-into VRM; staging immersion 4 is a controller change, see [CONTROLS.md](CONTROLS.md).
+into VRM.
 
 ### Buffer sensor pockets
 
@@ -324,7 +324,6 @@ issues are in [POWER.md](POWER.md).
 | Towel rails on the DHW circuit | Plumbed onto DHW rather than the radiator circuit, so they run at cylinder temperature outside the weather-compensated zone |
 | Heat loop pump mixing the buffer | ΔT pump, or remove the plate heat exchanger |
 | Living 1 and Kitchen 3 radiators undersized at 45 °C | Accepted on stove and cooking gains; upgrade if they struggle |
-| Buffer immersion 4 not yet in service | Wiring done; staging is a controller change, see [CONTROLS.md](CONTROLS.md) |
 
 ## References
 

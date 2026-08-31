@@ -2,9 +2,10 @@
 // Copyright (c) 2025-2026 Robert McQueen
 //
 // Surplus Dump Load Controller for Shelly Pro 0/1-10V Dimmer
-// Monitors Victron energy and controls three 2.69kW dump loads:
+// Monitors Victron energy and controls four 2.69kW dump loads:
 // - Local dimmer output (SSR controlled via 0-10V)
 // - Two remote switches on Shelly Pro 2PM (via MQTT RPC)
+// - One remote switch on Shelly Pro 1PM (via MQTT RPC)
 //
 // Algorithm: Available = Solar + DC Hydro - AC + Intended Dumps - EV Headroom
 // Uses intended dump power (not actual) to avoid feedback loops
@@ -19,14 +20,16 @@ let config = {
     portalId: "c0847dc9a794" // VRM portal ID
   },
 
-  // Remote dump load switches (Shelly Pro 2PM)
+  // Remote dump load switches, in allocation order. Each entry carries its own device,
+  // so the constant stages need not share a Shelly: immersions 1 and 2 are the two
+  // channels of the Pro 2PM, immersion 4 is a Pro 1PM of its own. switchId is the
+  // channel on that device and is not the position in this list.
   remoteSwitches: {
-    deviceId: "shellypro2pm-ec6260a03d70",
     switches: [
-      { id: 0, name: "Pro 2PM Switch 0" },
-      { id: 1, name: "Pro 2PM Switch 1" }
-    ],
-    rpcTopic: "shellypro2pm-ec6260a03d70/rpc"
+      { deviceId: "shellypro2pm-ec6260a03d70", switchId: 0, name: "Buffer Immersion 1" },
+      { deviceId: "shellypro2pm-ec6260a03d70", switchId: 1, name: "Buffer Immersion 2" },
+      { deviceId: "shellypro1pm-5c013b056870", switchId: 0, name: "Buffer Immersion 4" }
+    ]
   },
 
   // Victron topics (will be prefixed with N/<portalId>/)
@@ -41,6 +44,22 @@ let config = {
     vebusState: "vebus/276/State",                 // VE.Bus state (9=Inverting required for dump loads)
     inverterOutput: "vebus/276/Ac/Out/L1/P"       // VE.Bus inverter output power (W)
   },
+
+  // What we actually subscribe to. A Shelly script may hold ten MQTT subscriptions and
+  // no more — exceeding it throws "Too many subscriptions" and the script does not run —
+  // so the three evcharger paths above are taken as one subtree instead of three
+  // subscriptions. Messages are still matched against the exact paths in config.victron,
+  // so the extra topics the subtree delivers are read and ignored.
+  // Seven here, plus one per remote switch device, leaves one spare.
+  victronSubscriptions: [
+    "system/0/Ac/PvOnOutput/L1/Power",
+    "dcsource/279/Dc/0/Power",
+    "system/0/Ac/ConsumptionOnOutput/L1/Power",
+    "evcharger/40/#",
+    "system/0/Dc/Battery/Soc",
+    "vebus/276/State",
+    "vebus/276/Ac/Out/L1/P"
+  ],
 
   // EVSE control
   evse: {
@@ -65,6 +84,11 @@ let config = {
 
   // Timing settings
   checkInterval: 5 * 1000,    // 5 seconds in milliseconds
+
+  // How long to wait for every remote stage to report its status before controlling
+  // anyway. Covers a stage that is idle and therefore silent, and a broker reconnect,
+  // which clears the received flags.
+  statusSeedTimeout: 90 * 1000,
 
   // Virtual component IDs (minimal to avoid MQTT spam)
   virtualComponents: {
@@ -100,11 +124,11 @@ let state = {
   availablePower: 0,         // Available power for dump loads (after headroom reserves)
   intendedDumpPower: 0,      // Power we intend dump loads to consume
 
-  // Remote switch states
-  remoteSwitches: [
-    { on: false, voltage: 0, power: 0, statusReceived: false, lastChangeTime: 0 },
-    { on: false, voltage: 0, power: 0, statusReceived: false, lastChangeTime: 0 }
-  ],
+  // Remote switch states, built below from config.remoteSwitches.switches
+  remoteSwitches: [],
+
+  // When the first control pass ran without every stage having reported
+  firstIncompleteCheck: 0,
 
   // Local dimmer state
   localDimmer: {
@@ -121,6 +145,18 @@ let state = {
   // Timer
   timerId: null
 };
+
+// One state entry per configured stage, so the two lists cannot drift apart: every
+// place that walks one of them indexes the other by the same position.
+for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
+  state.remoteSwitches.push({
+    on: false,
+    voltage: 0,
+    power: 0,
+    statusReceived: false,
+    lastChangeTime: 0
+  });
+}
 
 // ===== Virtual component handles =====
 let handles = {
@@ -204,10 +240,12 @@ function updateStatus(event) {
   let dumpPower = getDumpLoadPower();
   let dumpPart = " Dump:" + dumpPower.toFixed(0) + "W";
 
-  let sw0 = state.remoteSwitches[0].on ? "S0:ON" : "S0:OFF";
-  let sw1 = state.remoteSwitches[1].on ? "S1:ON" : "S1:OFF";
-  let dim = state.localDimmer.on ? "Dim:" + state.localDimmer.brightness + "%" : "Dim:OFF";
-  let loadsPart = " [" + sw0 + " " + sw1 + " " + dim + "]";
+  let loads = [];
+  for (let i = 0; i < state.remoteSwitches.length; i++) {
+    loads.push("S" + i + (state.remoteSwitches[i].on ? ":ON" : ":OFF"));
+  }
+  loads.push(state.localDimmer.on ? "Dim:" + state.localDimmer.brightness + "%" : "Dim:OFF");
+  let loadsPart = " [" + loads.join(" ") + "]";
 
   let eventPart = event ? " - " + event : "";
 
@@ -330,29 +368,31 @@ function processMqttMessage(topic, message) {
   try {
     let payload = JSON.parse(message);
 
-    // Check if this is a remote switch status message
-    let switchTopicPrefix = config.remoteSwitches.deviceId + "/status/switch:";
-    if (topic.indexOf(switchTopicPrefix) === 0) {
-      // Extract switch ID from topic (e.g., "shellypro2pm-ec6260a03d70/status/switch:0" -> "0")
-      let switchId = parseInt(topic.substring(switchTopicPrefix.length));
+    // Check if this is a remote switch status message. The device wildcards also
+    // deliver input, sys and wifi topics, so match the exact switch topic per stage
+    // rather than a prefix.
+    for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
+      let sw = config.remoteSwitches.switches[i];
 
-      if (switchId >= 0 && switchId < state.remoteSwitches.length) {
-        if (payload.output !== undefined) {
-          state.remoteSwitches[switchId].on = Boolean(payload.output);
-        }
-        if (payload.voltage !== undefined) {
-          state.remoteSwitches[switchId].voltage = parseFloat(payload.voltage);
-        }
-        if (payload.apower !== undefined) {
-          state.remoteSwitches[switchId].power = parseFloat(payload.apower);
-        }
-
-        state.remoteSwitches[switchId].statusReceived = true;
-
-        logDebug(config.remoteSwitches.switches[switchId].name + ": on=" + state.remoteSwitches[switchId].on +
-                ", voltage=" + state.remoteSwitches[switchId].voltage + "V" +
-                ", power=" + state.remoteSwitches[switchId].power + "W");
+      if (topic !== sw.deviceId + "/status/switch:" + sw.switchId) {
+        continue;
       }
+
+      if (payload.output !== undefined) {
+        state.remoteSwitches[i].on = Boolean(payload.output);
+      }
+      if (payload.voltage !== undefined) {
+        state.remoteSwitches[i].voltage = parseFloat(payload.voltage);
+      }
+      if (payload.apower !== undefined) {
+        state.remoteSwitches[i].power = parseFloat(payload.apower);
+      }
+
+      state.remoteSwitches[i].statusReceived = true;
+
+      logDebug(sw.name + ": on=" + state.remoteSwitches[i].on +
+              ", voltage=" + state.remoteSwitches[i].voltage + "V" +
+              ", power=" + state.remoteSwitches[i].power + "W");
       return;
     }
 
@@ -449,16 +489,28 @@ function setupMqttSubscriptionsAndKeepalive() {
 
   // Subscribe to Victron topics
   let topicPrefix = "N/" + config.cerbo.portalId + "/";
-  for (let key in config.victron) {
-    let topic = topicPrefix + config.victron[key];
+  for (let i = 0; i < config.victronSubscriptions.length; i++) {
+    let topic = topicPrefix + config.victronSubscriptions[i];
     MQTT.subscribe(topic, processMqttMessage);
     logDebug("Subscribed to: " + topic);
   }
 
-  // Subscribe to remote switch topics using wildcard (reduces 2 subscriptions to 1)
-  let switchTopic = config.remoteSwitches.deviceId + "/status/+";
-  MQTT.subscribe(switchTopic, processMqttMessage);
-  logDebug("Subscribed to: " + switchTopic);
+  // Subscribe to remote switch topics using one wildcard per device, so stages sharing
+  // a device (immersions 1 and 2) still cost a single subscription. Subscriptions are a
+  // scarce resource on Shelly, so de-duplicate rather than subscribing per stage.
+  let subscribedDevices = [];
+  for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
+    let deviceId = config.remoteSwitches.switches[i].deviceId;
+
+    if (arrayContains(subscribedDevices, deviceId)) {
+      continue;
+    }
+    subscribedDevices.push(deviceId);
+
+    let switchTopic = deviceId + "/status/+";
+    MQTT.subscribe(switchTopic, processMqttMessage);
+    logDebug("Subscribed to: " + switchTopic);
+  }
 
   // Wait 2 seconds for subscriptions to become active on broker before sending keepalive
   // This ensures the Cerbo GX will deliver retained messages to our active subscriptions
@@ -519,6 +571,9 @@ function resetMqttData() {
     state.remoteSwitches[i].power = 0;
     state.remoteSwitches[i].statusReceived = false;
   }
+
+  // Re-arm the bounded wait, so a reconnect cannot leave us gated on a silent stage
+  state.firstIncompleteCheck = 0;
 
   logDebug("Reset MQTT data due to disconnection");
 }
@@ -611,27 +666,30 @@ function updateLocalDimmerState() {
 }
 
 // ===== Remote device control via MQTT RPC =====
-function sendRemoteSwitchCommand(switchId, turnOn, reason) {
+// index is the position in config.remoteSwitches.switches; the channel actually
+// commanded is that entry's switchId, on that entry's own device.
+function sendRemoteSwitchCommand(index, turnOn, reason) {
   if (!state.mqttConnected) {
     logDebug("Cannot send RPC command: MQTT not connected");
     return;
   }
 
+  let sw = config.remoteSwitches.switches[index];
   let rpcId = getNextRpcId();
   let payload = JSON.stringify({
     id: rpcId,
     src: "surplus_ctrl",
     method: "Switch.Set",
     params: {
-      id: switchId,
+      id: sw.switchId,
       on: turnOn
     }
   });
 
-  logDebug("Sending RPC to " + config.remoteSwitches.switches[switchId].name +
-          ": " + (turnOn ? "ON" : "OFF") + " - " + reason);
+  logDebug("Sending RPC to " + sw.name + " (" + sw.deviceId +
+          " switch:" + sw.switchId + "): " + (turnOn ? "ON" : "OFF") + " - " + reason);
 
-  MQTT.publish(config.remoteSwitches.rpcTopic, payload, 1, false);
+  MQTT.publish(sw.deviceId + "/rpc", payload, 1, false);
 }
 
 function setLocalDimmer(turnOn, brightness, reason) {
@@ -786,11 +844,15 @@ function controlDumpLoads(dumpMax) {
 
 function calculateDesiredState(available) {
   let desired = {
-    switches: [false, false],  // Remote switches
+    switches: [],  // Remote switches, one per configured stage
     dimmerOn: false,
     dimmerBrightness: 0,
     intendedPower: 0
   };
+
+  for (let i = 0; i < state.remoteSwitches.length; i++) {
+    desired.switches.push(false);
+  }
 
   // If available power is below minimum, turn everything off
   if (available < config.dumpLoad.minSurplus) {
@@ -853,8 +915,12 @@ function calculateDesiredState(available) {
 
   desired.intendedPower = intendedPower;
 
-  logDebug("Allocation: Switch0=" + (desired.switches[0] ? "ON" : "OFF") +
-          ", Switch1=" + (desired.switches[1] ? "ON" : "OFF") +
+  let allocation = [];
+  for (let i = 0; i < desired.switches.length; i++) {
+    allocation.push("Switch" + i + "=" + (desired.switches[i] ? "ON" : "OFF"));
+  }
+
+  logDebug("Allocation: " + allocation.join(", ") +
           ", Dimmer=" + (desired.dimmerOn ? desired.dimmerBrightness + "%" : "OFF") +
           ", intended=" + intendedPower.toFixed(0) + "W" +
           ", unused=" + Math.max(0, remainingPower - (dimmerPercent/100 * heaterPower)).toFixed(0) + "W");
@@ -928,9 +994,22 @@ function checkSystemState() {
     }
 
     if (!allSwitchStatusReceived) {
-      logDebug("Waiting for initial remote switch status before controlling");
-      updateStatus("Waiting for initial data");
-      return;
+      // Shelly publishes switch status on change and does not retain it, so a stage
+      // that has not switched since we connected may not announce itself for a long
+      // time. Waiting indefinitely would let one idle stage hold every other load off,
+      // so bound the wait and then treat the silent stages as off. Commanding a stage
+      // that is already in the desired position is a no-op, so guessing wrong is cheap.
+      if (state.firstIncompleteCheck === 0) {
+        state.firstIncompleteCheck = Date.now();
+      }
+
+      if (Date.now() - state.firstIncompleteCheck < config.statusSeedTimeout) {
+        logDebug("Waiting for initial remote switch status before controlling");
+        updateStatus("Waiting for initial data");
+        return;
+      }
+
+      console.log("Proceeding without status from every stage; assuming the silent ones are off");
     }
 
     // We have all statuses - initialize intended power to match actual state
@@ -989,11 +1068,15 @@ function checkSystemState() {
 
 function suppressAllLoads(reason) {
   let desired = {
-    switches: [false, false],
+    switches: [],
     dimmerOn: false,
     dimmerBrightness: 0,
     intendedPower: 0
   };
+
+  for (let i = 0; i < state.remoteSwitches.length; i++) {
+    desired.switches.push(false);
+  }
 
   applyDesiredState(desired, reason);
 }

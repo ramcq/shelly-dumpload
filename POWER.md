@@ -103,7 +103,7 @@ The canonical list. Correct it here and nowhere else.
 | IP | Device | Role |
 |---|---|---|
 | 192.168.1.71 | Cerbo GX | MQTT broker, VRM gateway |
-| 192.168.1.65 | Shelly Pro 1PM `SPSW-201PE15UL` | *Buffer Immersion 4* — wired and registered, no script yet |
+| 192.168.1.65 | Shelly Pro 1PM `shellypro1pm-5c013b056870` | Buffer immersion 4 — switched by `surplus-dump-controller.js` on .251 over MQTT RPC |
 | 192.168.1.88 | Shelly 1PM Gen3 `shelly1pmg3-543204558c6c` | DHW immersion — Left Top |
 | 192.168.1.89 | Shelly Pro 3EM `shellypro3em-2cbcbba67614` | *Heat Pump Power* — **triphase** profile, heat pump on phase A. Read it as `em:0` (`a_act_power`); `EM1.GetStatus` returns 404 in this profile |
 | 192.168.1.90 | Shelly 1PM Gen3 `shelly1pmg3-543204558fc8` | DHW immersion — Left Bottom, **lead relay**, time switch on its input |
@@ -189,6 +189,10 @@ is how devices follow one another.
 > device must seed its view with an HTTP `Switch.GetStatus` at startup rather than wait. This
 > applies to the existing lead relay follow as much as to anything new.
 
+What a controller does about that gap is the script's business — see the subscription and
+seeding patterns in [README.md](README.md); relay `in_mode` and `initial_state` are set out
+in [CONTROLS.md](CONTROLS.md).
+
 
 ---
 
@@ -197,5 +201,4 @@ is how devices follow one another.
 | Item | Status |
 |---|---|
 | `acload/55` and `/56` both named *Garage Fan Coil*; `/57` and `/58` both named *Buffer Immersion 1 & 2* | VRM cannot tell the fan coil from the circulation pump, or immersion 1 from immersion 2. Cosmetic, but the instance-to-channel mapping above is the only way to read them correctly |
-| Buffer immersion 4 (.65) not yet switched by anything | Registered and metered; needs a stage in `surplus-dump-controller.js` — see [CONTROLS.md](CONTROLS.md) |
 | Only 3 of 5 BYD batteries connected | Roughly halves the energy behind the shortage band |

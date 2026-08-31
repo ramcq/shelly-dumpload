@@ -16,23 +16,30 @@ let config = {
     portalId: "c0847dc9a794" // VRM portal ID
   },
 
-  // Dump load devices to monitor (3 switches total)
-  // All of these are dump loads - monitors for: output ON + voltage present + no consumption
-  // When ANY of these is at thermal cut-out (voltage but no power), thermal dump can operate
+  // The buffer immersions, one entry per stage that surplus-dump-controller.js can switch.
+  // Each is watched for output ON + voltage present + no consumption, which is the thermal
+  // cutout having opened. When ANY of them is cut out, the thermal dump can operate.
+  // Keep this list in step with the stages in surplus-dump-controller.js: an immersion that
+  // can be switched but is not listed here cuts out with nothing to recover it.
   dumpLoads: [
-    // Shelly Pro 2PM dump load (ec6260a03d70) - 2 switches
+    // Shelly Pro 2PM (ec6260a03d70) - 2 switches
     {
-      name: "Pro 2PM Switch 0",
+      name: "Buffer Immersion 1",
       statusTopic: "shellypro2pm-ec6260a03d70/status/switch:0"
     },
     {
-      name: "Pro 2PM Switch 1",
+      name: "Buffer Immersion 2",
       statusTopic: "shellypro2pm-ec6260a03d70/status/switch:1"
     },
-    // Shelly Pro Dimmer 0/1-10V PM dump load (8813bfe0e128) - 1 "light"
+    // Shelly Pro Dimmer 0/1-10V PM (8813bfe0e128) - 1 "light"
     {
-      name: "Pro 0-10V PM Dimmer",
+      name: "Buffer Immersion 3",
       statusTopic: "shellypro0110pm-8813bfe0e128/status/light:0"
+    },
+    // Shelly Pro 1PM (5c013b056870) - 1 switch
+    {
+      name: "Buffer Immersion 4",
+      statusTopic: "shellypro1pm-5c013b056870/status/switch:0"
     }
   ],
 
@@ -106,6 +113,12 @@ let state = {
   // Timer
   timerId: null
 };
+
+// One state entry per watched load, built here rather than during setup so the array
+// exists before any status message can arrive and cannot drift from the config.
+for (let i = 0; i < config.dumpLoads.length; i++) {
+  state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
+}
 
 // Helper to get output object by ID
 function getOutput(outputId) {
@@ -245,11 +258,6 @@ function finishSetup() {
     console.log("Error getting component handles: " + e.message);
   }
 
-  // Initialize dump load state array
-  for (let i = 0; i < config.dumpLoads.length; i++) {
-    state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
-  }
-
   // Set up event handlers
   setupEventHandlers();
 
@@ -266,7 +274,7 @@ function finishSetup() {
   console.log("Min Voltage: " + config.thresholds.minVoltage + "V");
   console.log("Max Consumption: " + config.thresholds.maxConsumption + "W");
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
-  console.log("Monitoring " + config.dumpLoads.length + " dump load switches (Pro 2PM x2, Pro Dimmer x1)");
+  console.log("Monitoring " + config.dumpLoads.length + " dump load switches (Pro 2PM x2, Pro Dimmer x1, Pro 1PM x1)");
   console.log("==============================================");
 
   updateStatus("Monitoring started");
