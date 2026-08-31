@@ -17,3 +17,6 @@ env/
 *.swp
 *.swo
 *~
+
+# Vendor documentation (large PDFs, freely available from the manufacturers)
+docs/*.pdf

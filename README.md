@@ -11,43 +11,18 @@ These scripts are designed to work with:
 
 Developed for an off-grid system with Victron Quattro inverters, a Cerbo GX, AC-coupled solar and hydro generation, DC-coupled hydro, and multiple resistive dump loads (immersion heaters). The scripts should be adaptable to other Victron-based systems with similar topology.
 
-**Overload Risk:** The surplus-dump-controller enforces an inverter contribution limit for its own loads. The dump-load-controller instances have a generation gate (won't enable without sufficient generation) and inverter headroom checks, but operate independently. When multiple dump loads are active simultaneously with high generation that then drops away (e.g., hydro trip), the combined load plus house consumption can exceed inverter capacity until loads cycle off via SOC hysteresis.
+### Documentation
 
-### Power Flow Architecture
+This file describes **each script** — what it does, how it is configured, how it is deployed. The system it runs on is documented alongside it:
 
-Understanding the power flow is critical for safe operation:
+| Document | Covers |
+|---|---|
+| [POWER.md](POWER.md) | The electrical installation: generation, battery, inverters, generator settings, and the canonical device inventory |
+| [HEATING.md](HEATING.md) | The heating plant: heat pump, biomass boiler, buffer, zones, wiring, commissioning |
+| [CONTROLS.md](CONTROLS.md) | The system as a whole: shortage, who decides it, what each actuator does, and the work not yet implemented |
+| [CONTEXT.md](CONTEXT.md) | The glossary: buffer immersion vs DHW immersion, dump load as a mode, shortage, release vs lock, DHW demand vs DHW enable |
 
-**AC-Coupled Generation (AC Output Side):**
-- PV inverters and AC-coupled hydro generators connect to the **AC output** (not AC input)
-- Power from AC-coupled sources flows directly to loads on AC output
-- This power does NOT count against the inverter's battery contribution limit
-- Victron reports this as "Solar" power (system/0/Ac/PvOnOutput/L1/Power)
-
-**DC-Coupled Generation (Battery Side):**
-- DC-coupled sources (small hydro turbine) connect to the DC side
-- Power must go through the inverter to reach AC loads
-- This power DOES count against the inverter's output capacity limit
-
-**Inverter Contribution:**
-- The inverter has a maximum power limit for battery discharge (typically 14-15kW)
-- **Inverter Contribution = AC Consumption - AC-Coupled Generation**
-- DC-coupled generation goes through the inverter, so it doesn't reduce inverter contribution
-- This is the net power being drawn from the battery through the inverter
-- Exceeding this limit causes inverter overload warnings and can trip the system
-
-**Critical Safety Limit:**
-The surplus-dump-controller enforces a 12kW inverter contribution limit (leaving 2kW headroom for unexpected loads like kettles, immersions, etc.). When battery SOC is high and dump loads are enabled, the controller calculates:
-```
-Current Inverter Contribution = AC Consumption - AC-Coupled Generation
-Available Capacity = 12kW - Current Inverter Contribution
-```
-DC-coupled sources (like the DC hydro turbine) add power but go through the inverter, so they don't reduce the inverter contribution calculation. Dump loads are only enabled up to the available capacity to prevent overload.
-
-**Generator/AC Hydro Interactions:**
-- Diesel generators can knock AC-coupled hydro generators offline when they start (frequency/voltage mismatch)
-- Always verify AC hydro has restarted after diesel generator test runs or power events
-- Monitor AC-coupled generator power output to confirm operation
-- DC-coupled hydro is not affected by generator starts as it's on the battery side
+Power flow — why AC-coupled generation does not count against the inverter's battery contribution, and how the 12 kW limit is calculated — is in [POWER.md](POWER.md). The overload risk that remains when several controllers act independently is in [CONTROLS.md](CONTROLS.md).
 
 ## Quick Start / Deployment
 
@@ -305,6 +280,8 @@ let config = {
 2. **dump-load-controller.js** - Run on multiple 1PM devices with lead relay coordination
 3. **thermal-dump-controller.js** - Run on 2PM controlling pump/fan for heat recovery
 
+How these are combined at Muttonhall, including the thresholds each instance runs, is in [CONTROLS.md](CONTROLS.md).
+
 ---
 
 ## Debugging
@@ -325,14 +302,13 @@ Each controller writes a status summary to a virtual text component. You can fet
 
 ```bash
 # dump-load-controller (text:204)
-wget -qO- http://192.168.1.88/rpc/Text.GetStatus?id=204
+wget -qO- http://<device>/rpc/Text.GetStatus?id=204
 
-# surplus-dump-controller (text:200)
-wget -qO- http://192.168.1.251/rpc/Text.GetStatus?id=200
-
-# thermal-dump-controller (text:200)
-wget -qO- http://192.168.1.156/rpc/Text.GetStatus?id=200
+# surplus-dump-controller, thermal-dump-controller (text:200)
+wget -qO- http://<device>/rpc/Text.GetStatus?id=200
 ```
+
+Device addresses are in [POWER.md](POWER.md).
 
 Example output:
 ```
