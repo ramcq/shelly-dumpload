@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 Robert McQueen
 //
-// Simplified Dump Load Controller for Shelly 1PM Gen3 / 1 Mini Gen3
-// Controls relay based on battery SOC from Victron Cerbo GX via MQTT
-// Also monitors a "lead" relay's input state (manual time switch) to coordinate multiple relays
+// SOC Relay Controller for Shelly 1PM Gen3 / 1 Mini Gen3
+// Relay on above a high battery SOC threshold, off below a low one, gated on VE.Bus state,
+// from the Victron Cerbo GX over MQTT. Also monitors a "lead" relay's input state (manual
+// time switch) to coordinate multiple relays.
 //
 // Two roles, resolved from the device ID at startup. See CONTROLS.md.
 //   Dump load (.88 .90 .91 .100) - DHW immersions on a narrow SOC band
-//   Shortage lead (.209)         - determines shortage on a 60-point band
+//   Shortage lead (.209)         - determines shortage on a 60-point band. Not a dump load,
+//                                  which is why this file is not named for one
 
 // ===== Configuration =====
 let config = {
@@ -345,7 +347,7 @@ function finishSetup() {
   // Start monitoring loop
   startMonitoring();
 
-  console.log("=== Dump Load Controller Configuration ===");
+  console.log("=== SOC Relay Controller Configuration ===");
   console.log("Role: " + (state.isShortageLead ? config.shortageLead.name + " (determines shortage)" : "dump load"));
   console.log("Device is lead relay: " + state.isLeadRelay);
   console.log("High SOC Threshold: " + state.highSocThreshold + "%");
@@ -979,7 +981,7 @@ function initializeVirtualComponents() {
 }
 
 function init() {
-  console.log("Dump Load Controller Script starting");
+  console.log("SOC Relay Controller starting");
 
   // Initial state update
   updateDeviceState();

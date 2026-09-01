@@ -73,7 +73,7 @@ being covered for: a generator on either AC input, a fault, an external override
 passthrough. All of it says the same thing — limit consumption. State 9 is the only state in
 which this system is doing what it normally does, so everything else is shortage.
 
-This is also the gate `dump-load-controller.js` already applies to the dump loads, so the
+This is also the gate `soc-relay-controller.js` already applies to the dump loads, so the
 heating relays inherit a rule that is proven rather than inventing a second notion of
 trouble. It costs no extra subscription — `vebus/276/State` is already in the topic set —
 and it removes any need to read the generator service or enumerate its condition codes.
@@ -167,7 +167,7 @@ run, so they were not loading the genset. If runs that long recur, 45 minutes co
 | Actuator | Rule |
 |---|---|
 | Heat Pump Enable (.209) | Closed unless in shortage |
-| DHW immersions (`dump-load-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
+| DHW immersions (`soc-relay-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
 | Buffer immersions (`surplus-dump-controller.js`) | Surplus tracking across three constant stages and the dimmer |
 | Boiler Release (.164) | Released on sustained shortage, **or** H1, **or** DHW demand, **or** exercise |
 | DHW Enable (.123) | The time clock, unconditionally; **or** a shortage DHW window |
@@ -365,8 +365,8 @@ or the lead relay closed for its own reasons without giving up the hardware path
 
 | Script | Device | Derived from | Job | State |
 |---|---|---|---|---|
-| `dump-load-controller.js` | .209 | existing, reconfigured | Determine shortage: 90% on, 30% off, VE.Bus gate, no generation gate, no headroom check | Written |
-| `dump-load-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage | To do |
+| `soc-relay-controller.js` | .209 | existing, reconfigured | Determine shortage: 90% on, 30% off, VE.Bus gate, no generation gate, no headroom check | Written |
+| `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage | To do |
 | `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run | To do |
 | `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status | To do |
 
