@@ -499,3 +499,29 @@ test("a disconnect handler is installed even when MQTT is already connected", ()
   assert.strictEqual(mod.state.vebusState, 0, "a lost broker must not leave a stale state");
   assert.strictEqual(mod.state.mqttConnected, false);
 });
+
+// ===== Seeding a value that almost never changes =====
+
+// The broker publishes nothing until a value changes, so a state that changes only when a
+// generator runs is only ever seen in a republish burst — and the subscriptions are not
+// reliably live in time for the one the first keepalive triggers. Everything else in the
+// topic set changes every few seconds and arrives regardless, so this fails silently on
+// exactly one topic: the one the VE.Bus gate depends on.
+test("keepalives keep requesting a republish until VE.Bus has been seen", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  assert.ok(keepalive, "no periodic keepalive was scheduled");
+
+  published.length = 0;
+  keepalive.fn();
+  assert.strictEqual(published[0].payload, "",
+    "an empty payload is what asks the broker to republish everything");
+
+  victron(mod, "vebusState", INVERTING);
+  published.length = 0;
+  keepalive.fn();
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
+    "once seen, stop asking the whole system to republish every 30 seconds");
+});

@@ -598,12 +598,18 @@ function handleMqttConnected() {
   // Send initial keepalive
   sendKeepalive(false);
 
-  // Setup periodic keepalive (every 30 seconds)
+  // Setup periodic keepalive (every 30 seconds).
+  //
+  // Keep asking for a full republish until the VE.Bus state has actually been seen. The
+  // broker publishes nothing until a value changes, so the only chance at a state that
+  // changes as rarely as this one is a republish - and the subscriptions above are not
+  // reliably live in time for the burst the first keepalive triggers. Everything else in
+  // the topic set changes every few seconds and so arrives regardless.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(true);
+    sendKeepalive(state.vebusReceived);
   });
 }
 

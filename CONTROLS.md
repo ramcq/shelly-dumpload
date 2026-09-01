@@ -401,6 +401,15 @@ The script also asserts `status_ntf` in the device's MQTT config. Every follower
 .209's published switch status and nothing else, so a device with status notifications off
 is a controller whose decision never leaves it.
 
+The Victron broker behaves the same way, and worse for a value that rarely changes: it
+publishes nothing until a value changes, and the one chance at the rest is the republish an
+empty-payload keepalive triggers. Subscriptions are not reliably live in time for the burst
+following the first keepalive, so a controller can start up and never see `vebus/276/State`
+— which changes only when a generator runs, months apart. Every other topic in the set
+changes every few seconds and arrives regardless, so this fails on exactly the one the gate
+depends on. The keepalive therefore keeps requesting a republish until that state has been
+seen. Observed on .209 on first deployment, 1 September 2026.
+
 Shelly status notifications are published on change and are **not** retained, so a script
 that follows another device sees nothing until that device next changes state. Every
 follower must therefore seed itself with an HTTP `Switch.GetStatus` against the device it
