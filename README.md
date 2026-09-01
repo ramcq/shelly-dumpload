@@ -83,26 +83,37 @@ which device and channel a stage actually commands, the
 [initialisation](#seeding-state-from-other-devices) — the last two because both fail by
 stopping the whole controller, not just the stage being changed.
 
+`dump-load-controller.js` runs in two roles from one file, so its tests assert both: that
+the shortage lead drops every dump-load gate, and that the immersions keep every one of
+them.
+
 ## Scripts Overview
 
 ### dump-load-controller.js
-**Device:** Shelly Plus 1PM Gen3
-**Purpose:** Coordinated SOC-based dump load control with manual override
+**Device:** Shelly Plus 1PM Gen3 (DHW immersions), Shelly 1 Mini Gen3 (Heat Pump Enable)
+**Purpose:** Relay on above a high SOC threshold, off below a low one, gated on VE.Bus state
 
-Simplified dump load controller with multi-device coordination. One device acts as "lead relay" with manual time switch, and other relays follow its state.
+Two roles, resolved from the device ID at startup:
+
+| Role | Devices | Job |
+|---|---|---|
+| Dump load | .88 .90 .91 .100 | DHW immersions on a narrow SOC band, coordinated by a lead relay carrying the manual time switch |
+| Shortage lead | .209 | Owns the shortage decision, expressed as its own relay — the Grant's heat pump lock. See [CONTROLS.md](CONTROLS.md) |
 
 **Features:**
 - Lead relay coordination via MQTT
 - Manual time switch support (connected to lead relay input)
 - User-configurable SOC thresholds
-- Auto-calculated hysteresis (low = high - 1%), with no dwell in either direction
+- Hysteresis derived as low = high - 1%, or stated outright where the band is wide (90/30)
+- No dwell timers in either direction
 - AC input suppression
 
-**Priority Logic:**
+**Priority Logic:** (0, 1, 2 and the checks in 4 are dump load concerns, which the shortage
+lead drops; 3 and the thresholds in 4 apply in both roles)
 0. **Inverter overload** - Emergency suppression if inverter output exceeds limit (overrides all)
 1. **Local input** - Manual override (with inverter headroom check before enabling)
 2. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
-3. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed
+3. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed. An unknown or stale state counts as not inverting; a state not yet received within `config.startupGrace` (3 minutes) of starting counts as nothing, since the first poll happens before MQTT has connected and the Cerbo boots slower than the Shelly
 4. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
 
 **Generation Gate:**
@@ -118,15 +129,25 @@ Simplified dump load controller with multi-device coordination. One device acts 
 - Belt-and-braces polling check in checkSystemState (every 30s)
 - Configurable via `config.inverter.emergencyLimit` and `config.inverter.heaterPower`
 
+**Shortage Lead Role (.209, Heat Pump Enable):**
+- `config.shortageLead.deviceId` selects the device; everything else keeps the dump load defaults
+- Thresholds 90% to leave shortage, 30% to enter — a 60-point band, stated outright rather than derived
+- Every dump load gate dropped: no generation gate, no headroom check, no overload fast-path. The heat pump is a load, not a dump, and overload reaches it through the VE.Bus term once the generator starts
+- `followTimeSwitch: false` — nothing is wired to its input, and hot water is no reason to run the heat pump on a flat battery
+- No threshold slider: `number:202` is shared with `smart-load-controller.js` and stops at 50, so both numbers stay in the file
+- Status text reads `SHORTAGE: heat pump locked`, since this relay is the shortage state expressed physically
+- Requires the relay to be `detached` with `initial_state: "on"` — see the relay configuration table in [CONTROLS.md](CONTROLS.md)
+
 **Configuration:**
 - Set `config.leadRelay.deviceId` to MAC address of lead relay
-- Script auto-detects if current device is lead relay
+- Script auto-detects its role from the device ID: shortage lead, time-switch lead relay, or follower. An unreadable device ID is retried every `config.identityRetryDelay`, and no relay is commanded until the role is known
 - Lead relay uses local input; others monitor via MQTT
+- Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch status and nothing else, so a device that does not publish is a controller whose decision never leaves it
 
 **Virtual Components:**
 - `number:202` - High SOC Threshold (%) — matches smart-load-controller for drop-in replacement
 - `text:204` - Status display
-- `group:205` - Dump Load Controller group
+- `group:205` - Group, named for the role at creation (`Dump Load Controller`, `Heat Pump Enable`); an existing group is not renamed, and holds only the status text on the shortage source
 
 ---
 

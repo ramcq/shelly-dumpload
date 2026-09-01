@@ -14,15 +14,16 @@ The division of labour across the documentation:
 | **CONTROLS.md** | The system — states, thresholds, who decides what, and why |
 | [CONTEXT.md](CONTEXT.md) | The vocabulary all four use |
 
-**Status.** The dump load side is live and has been for months. The heating side is designed
-and not yet implemented: no controller JavaScript exists for the three heating relays.
+**Status.** The dump load side is live and has been for months. On the heating side the
+heat pump lock is written and the other two relays are not.
 
 | Behaviour | State |
 |---|---|
 | DHW immersions on SOC thresholds, with a manual time switch | Live |
 | Buffer immersions tracking surplus | Live |
 | Thermal recovery from stalled buffer immersions | Live |
-| Shortage, heat pump lock, biomass release, DHW enable | **Designed only** |
+| Shortage and the heat pump lock | Written, not yet deployed |
+| Immersion floor in shortage, biomass release, DHW enable | **Designed only** |
 
 ---
 
@@ -37,14 +38,33 @@ So there is one state — **shortage** — on two terms:
 
 | | |
 |---|---|
-| Enter | SOC below **30%**, or VE.Bus state is anything other than Inverting (9) |
-| Leave | SOC above **90%** and VE.Bus back to Inverting |
+| Enter | SOC at or below **30%**, or VE.Bus state is anything other than Inverting (9) |
+| Leave | SOC at or above **90%** and VE.Bus back to Inverting |
 | Unknown or stale VE.Bus state | Counts as not inverting |
-| Minimum lock | 30 minutes once the heat pump has been locked |
+| No VE.Bus state yet, within three minutes of starting | Counts as nothing: no action either way |
 
 The band is 60 points wide — some 28 kWh across the three batteries currently connected — so
-the SOC term cannot chatter and needs no dwell timer. The minimum lock is for the
-compressor, not the logic: the heat pump should not be cycled by a transient.
+the SOC term cannot chatter and needs no dwell timer. **There are no dwell timers at all**,
+here or on the immersions: a year of logged SOC, replayed against these thresholds with no
+timers, gives under five relay operations a day, which is decades inside the relay's rating.
+The VE.Bus term does not chatter either — 31 excursions in 184 days, median 12 minutes, none
+of them oscillating. A dwell would bound a rate that is already low and would make the open
+relay ambiguous to every follower for as long as it lasted.
+
+Both terms therefore share one exit: SOC at or above 90% with VE.Bus back to Inverting. A
+VE.Bus excursion that clears while SOC sits mid-band would leave the heat pump locked until
+the battery next reaches 90%. In 184 days of logged VE.Bus data that has not happened — all
+31 excursions began above 97% — so the case is left unhandled rather than carrying machinery
+for it.
+
+An absent reading is not a stale one. The controller polls immediately on start, before
+MQTT has connected, so a gate that locked on the state it had not received yet would lock
+the heat pump on every redeploy — for a reading that arrives seconds later. The
+grace covers only the case of never having had a reading, and is not restored by a broker
+dropping later: once a state has been seen, silence is trouble again immediately. Three
+minutes, because after a site-wide outage the Cerbo starts booting well after the Shelly
+has finished. Without it, every redeploy would publish a brief false shortage to every
+follower.
 
 ### Why VE.Bus state, rather than "the generator is running"
 
@@ -123,6 +143,15 @@ on a VE.Bus one — and infers the cause rather than holding a threshold:
 | Open | Inverting (9) | Must be the SOC term — release now |
 | Open | Anything else | Could be transient — wait 30 minutes |
 
+With no dwell on .209 the inference is exact, give or take one 30-second poll, so .164 needs
+only a token dwell to cover that and no VE.Bus history of its own.
+
+**The 30 minutes needs re-checking against the data before .164 is written.** It is justified
+below as clearing the fortnightly generator test — "20 minutes of running plus a 20-minute
+minimum runtime", which is 40, not 30. Logged excursions run to 32.6 minutes, so the longest
+observed test run would have released the boiler at 98% SOC. 45 minutes looks like the right
+number.
+
 The 30% and 90% numbers therefore exist in exactly one deployment, on one device.
 
 A manual lock of the heat pump for maintenance also blocks timed immersion heating, which is
@@ -134,7 +163,7 @@ the right answer anyway: someone has declared the site short of power.
 
 | Actuator | Rule |
 |---|---|
-| Heat Pump Enable (.209) | Closed unless in shortage; 30-minute minimum lock |
+| Heat Pump Enable (.209) | Closed unless in shortage |
 | DHW immersions (`dump-load-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
 | Buffer immersions (`surplus-dump-controller.js`) | Surplus tracking across three constant stages and the dimmer |
 | Boiler Release (.164) | Released on sustained shortage, **or** H1, **or** DHW demand, **or** exercise |
@@ -166,9 +195,9 @@ Live behaviour, for context. Per-script detail is in [README.md](README.md).
 **DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
 threshold (96/95, 95/94, 94/93, 96/95) so they stagger rather than all switching at once.
 Each checks that total generation exceeds 500 W before enabling, so a full-reading battery at
-night cannot start a dump, and checks inverter headroom before adding its 2.7 kW. Turn-off is
-purely SOC, acting at once: a hydro trip takes 2.7 kW off the inverter immediately rather
-than waiting out a dwell. The lead relay (.90) carries a manual time switch on its input for intentional water
+night cannot start a dump, and checks inverter headroom before adding its 2.7 kW. Both
+directions act at once, with no dwell to wait out: a hydro trip takes 2.7 kW off the inverter
+immediately. The lead relay (.90) carries a manual time switch on its input for intentional water
 heating; the others follow it over MQTT.
 
 **Buffer immersions** — `surplus-dump-controller.js` on the dimmer allocates surplus
@@ -300,9 +329,9 @@ at least as aggressive as these.
 
 **No heat pump headroom check.** The heat pump is a load, not a dump. Its draw modulates
 between roughly 0.5 and 5 kW and its meter is not on the Cerbo, so any constant reserved for
-it would be fiction; a locked compressor stays off for the minimum lock plus the Grant's own
-restart delay rather than the seconds a shed dump load costs; and overload already reaches it
-through the VE.Bus term. The dump loads keep both protections, because for them the numbers
+it would be fiction; a locked compressor stays off for the Grant's own restart delay rather
+than the seconds a shed dump load costs; and overload already reaches it through the VE.Bus
+term. The dump loads keep both protections, because for them the numbers
 are real and the shed is free.
 
 ---
@@ -331,26 +360,43 @@ or the lead relay closed for its own reasons without giving up the hardware path
 
 ## Implementation plan
 
-| Script | Device | Derived from | Job |
-|---|---|---|---|
-| `dump-load-controller.js` | .209 | existing, reconfigured | Determine shortage: 90% on, 30% off, VE.Bus gate, no generation gate, no headroom check |
-| `dump-load-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage |
-| `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run |
-| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Timer or opportunistic enable; it already subscribes to buffer temperatures and boiler status |
+| Script | Device | Derived from | Job | State |
+|---|---|---|---|---|
+| `dump-load-controller.js` | .209 | existing, reconfigured | Determine shortage: 90% on, 30% off, VE.Bus gate, no generation gate, no headroom check | Written |
+| `dump-load-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage | To do |
+| `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run | To do |
+| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status | To do |
 
 .209 runs the same file as the four DHW immersions. Structurally it is the same controller —
 relay on above a high SOC threshold, off below a low one, gated on VE.Bus state, with a
 minimum time in state — so the proven MQTT, keepalive and re-entrancy code stays in one
-place. Two small additions are needed:
+place.
 
-- **Explicit `soc.lowThreshold`**, since it is currently derived as `highThreshold - 1` and
-  cannot express 90/30.
-- **`minOffTime`**, for the 30-minute minimum lock; the script has `minOnTime` only.
+**The role is resolved from the device ID at startup**, the way the lead relay already is,
+because `deploy.py` uploads one file unaltered and the four immersions must keep behaving
+exactly as they do. Matching `d885ac0a3668` pins the thresholds at 90/30 and drops all three
+dump-load gates: `minGenerationPower: 0` for the generation gate, `inverter.heaterPower: 0`
+for the headroom check and the overload fast-path, and `followTimeSwitch: false` so neither
+its own input nor the lead relay's can unlock the heat pump. Identity is resolved before the
+virtual components are created, since the role decides the threshold they are created with.
 
-The rest is configuration that already exists: `minGenerationPower: 0` disables the
-generation gate, `inverter.heaterPower: 0` disables the headroom check and emergency
-fast-path, plus flags for lead-relay follow (off for .209) and for the shortage-source topic
-the DHW immersions subscribe to.
+**Neither threshold is exposed on the device.** The immersions keep their persisted
+threshold slider, and .209 is created without one: component `202` is shared with the old
+`smart-load-controller.js` and stops at 50, so it can neither express the 30% entry nor be
+trusted not to carry a stale value that would move the shortage exit while the entry stayed
+pinned. Both numbers are properties of the system rather than preferences, and they live in
+the file, in one deployment. Immersions keep deriving their low threshold as
+`highThreshold - 1`, which is the stagger they exist to have.
+
+An identity that cannot be read is retried rather than guessed, and the controller commands
+nothing until it succeeds. Falling back to the dump load defaults would run .209 as an
+immersion — locked below 95%, shed by the overload path, unlocked by whatever floats on an
+unused input — whereas doing nothing leaves every relay in the unscripted behaviour the
+configuration table above guarantees.
+
+The script also asserts `status_ntf` in the device's MQTT config. Every follower reads
+.209's published switch status and nothing else, so a device with status notifications off
+is a controller whose decision never leaves it.
 
 Shelly status notifications are published on change and are **not** retained, so a script
 that follows another device sees nothing until that device next changes state. Every
