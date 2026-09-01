@@ -33,8 +33,8 @@ let config = {
     heaterPower: 2700       // W - approximate power of this heater (for headroom check before enabling)
   },
 
-  // Timing settings
-  minOnTime: 10 * 60 * 1000, // 10 minutes in milliseconds
+  // Timing settings. There is no dwell in either direction: SOC is an integral, so a load
+  // coming on bends its slope rather than erasing the signal the way frequency did.
   checkInterval: 30 * 1000,  // 30 seconds in milliseconds
 
   // Minimum generation required to enable dump loads (W)
@@ -73,7 +73,6 @@ let state = {
   leadRelayTopic: "",        // MQTT topic to monitor for lead relay input
 
   // Relay control state
-  lastSwitchedOnTime: 0,     // When we last turned the relay on
   relayIsOn: false,          // Current relay state (actual)
   intendedRelayOn: false,    // Intended relay state (prevents re-entrancy)
   inputIsActive: false,      // State of the local input
@@ -274,7 +273,6 @@ function finishSetup() {
     console.log("Low SOC Threshold: " + state.lowSocThreshold + "% (auto-calculated)");
     console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
     console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W");
-    console.log("Minimum On Time: " + (config.minOnTime / (60 * 1000)) + " minutes");
     console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
     if (!state.isLeadRelay) {
       console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
@@ -358,18 +356,12 @@ function setupEventHandlers() {
       if (newState === state.intendedRelayOn) {
         // Expected change - just update actual state
         state.relayIsOn = newState;
-        if (newState) {
-          state.lastSwitchedOnTime = Date.now();
-        }
         logDebug("Relay state changed as expected to: " + newState);
         return; // Don't call checkSystemState - this was our intended action
       } else {
         // Unexpected change (manual toggle or external control)
         state.relayIsOn = newState;
         state.intendedRelayOn = newState; // Sync intended with actual
-        if (newState) {
-          state.lastSwitchedOnTime = Date.now();
-        }
         logDebug("Relay state changed externally to: " + newState);
         checkSystemState(); // Reconcile state
       }
@@ -691,7 +683,6 @@ function turnRelayOn(reason) {
       }
 
       state.relayIsOn = true;
-      state.lastSwitchedOnTime = Date.now();
       updateStatus(reason);
     }
   );
@@ -778,9 +769,6 @@ function checkSystemState() {
     return;
   }
 
-  let currentTime = Date.now();
-  let timeElapsed = currentTime - state.lastSwitchedOnTime;
-
   let totalGeneration = state.acGeneration + state.dcGeneration;
   let sufficientGeneration = totalGeneration >= config.minGenerationPower;
 
@@ -792,8 +780,8 @@ function checkSystemState() {
   if (state.currentSoc >= state.highSocThreshold && !state.relayIsOn && sufficientGeneration && canSafelyEnable()) {
     turnRelayOn("SOC high + gen: " + state.currentSoc + "% >= " + state.highSocThreshold + "%, gen " + totalGeneration.toFixed(0) + "W");
   }
-  // Turn off when SOC reaches low threshold (and minimum on time elapsed)
-  else if (state.currentSoc <= state.lowSocThreshold && state.relayIsOn && timeElapsed >= config.minOnTime) {
+  // Turn off as soon as SOC reaches the low threshold: shedding is instant and reversible
+  else if (state.currentSoc <= state.lowSocThreshold && state.relayIsOn) {
     turnRelayOff("SOC low: " + state.currentSoc + "% <= " + state.lowSocThreshold + "%");
   }
 }

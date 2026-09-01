@@ -74,3 +74,24 @@ test("a disconnect handler is installed even when MQTT is already connected", ()
   assert.strictEqual(mod.state.vebusState, 0, "a lost broker must not leave a stale state");
   assert.strictEqual(mod.state.mqttConnected, false);
 });
+
+// ===== Shedding =====
+
+test("an immersion sheds the moment SOC falls", () => {
+  const { mod, calls } = load(DUMP);
+  mod.state.relayIsOn = true;
+  mod.state.intendedRelayOn = true;
+  victron(mod, "vebusState", 9);
+  victron(mod, "acGeneration", 3000);
+  victron(mod, "batterySOC", 94);
+
+  mod.checkSystemState();
+  assert.deepStrictEqual(
+    calls.filter((c) => c.method === "Switch.Set").map((c) => c.params.on), [false],
+    "a hydro trip must not wait out a dwell before 2.7 kW comes off the inverter");
+});
+
+test("there is no minimum on time", () => {
+  const { mod } = load(DUMP);
+  assert.strictEqual(mod.config.minOnTime, undefined);
+});

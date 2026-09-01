@@ -167,8 +167,8 @@ Live behaviour, for context. Per-script detail is in [README.md](README.md).
 threshold (96/95, 95/94, 94/93, 96/95) so they stagger rather than all switching at once.
 Each checks that total generation exceeds 500 W before enabling, so a full-reading battery at
 night cannot start a dump, and checks inverter headroom before adding its 2.7 kW. Turn-off is
-purely SOC and minimum-on-time, so generation dropping away mid-cycle does not cause rapid
-cycling. The lead relay (.90) carries a manual time switch on its input for intentional water
+purely SOC, acting at once: a hydro trip takes 2.7 kW off the inverter immediately rather
+than waiting out a dwell. The lead relay (.90) carries a manual time switch on its input for intentional water
 heating; the others follow it over MQTT.
 
 **Buffer immersions** — `surplus-dump-controller.js` on the dimmer allocates surplus

@@ -95,7 +95,7 @@ Simplified dump load controller with multi-device coordination. One device acts 
 - Lead relay coordination via MQTT
 - Manual time switch support (connected to lead relay input)
 - User-configurable SOC thresholds
-- Auto-calculated hysteresis (low = high - 1%)
+- Auto-calculated hysteresis (low = high - 1%), with no dwell in either direction
 - AC input suppression
 
 **Priority Logic:**
@@ -109,7 +109,7 @@ Simplified dump load controller with multi-device coordination. One device acts 
 - Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
 - Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
 - Naturally self-staggers multiple dump loads: each load coming on reduces battery charging rate, and only enables when its SOC threshold is met with sufficient generation
-- Turn-off is still purely SOC-based (low threshold + minimum on time) — generation dropping away mid-cycle doesn't force immediate shutoff, avoiding rapid cycling
+- Turn-off is purely SOC-based and immediate — a hydro trip sheds the load at once
 - Configurable via `config.minGenerationPower`
 
 **Inverter Overload Protection:**
@@ -268,11 +268,16 @@ Scripts create virtual components for:
 ### Event-Driven Architecture
 Scripts use `Shelly.addEventHandler()` and `Shelly.addStatusHandler()` to react to changes immediately rather than polling.
 
-### Minimum On-Time
-Most controllers enforce minimum on-time (typically 10 minutes) to:
-- Prevent rapid cycling
-- Reduce relay wear
-- Allow loads to stabilize
+### Dwell Timers
+`dump-load-controller.js` has none. A year of logged SOC replayed against its thresholds with
+no timers gives under five relay operations a day — decades inside the relay's rating — and
+SOC cannot chatter the way the old frequency signal could, because a load coming on bends the
+slope of an integral rather than cancelling the reading.
+
+`surplus-dump-controller.js` keeps a symmetric **`minChangeTime`** (10 minutes) per stage for
+a different reason: its allocator needs each stage's state to stand still long enough to
+budget against — a locked stage that is on consumes its nominal power whether or not it has
+been re-measured.
 
 ### MQTT Subscription Budget
 A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions`
