@@ -33,7 +33,14 @@ const EXPORTED = [
   "isDumpLoadStalled",
   "getDumpLoadState",
   // dump-load-controller
+  "applyRoleForDevice",
+  "setupVirtualComponents",
+  "handleMqttConnected",
   "connectMqtt",
+  "recordSwitchTime",
+  "assignLeadRelayTopic",
+  "determineDeviceIdentity",
+  "finishSetup",
   // common
   "setupMqttSubscriptionsAndKeepalive",
   "processMqttMessage",
@@ -51,14 +58,15 @@ function exportsLine() {
 
 let loadCounter = 0;
 
-// Load `scriptName` from the repo root. Returns the script's internals plus the MQTT
-// traffic, the RPC calls and the MQTT handlers it installed, so tests can assert on what
-// it published, subscribed to, commanded and registered. Each call is a fresh copy with
-// fresh state.
+// Load `scriptName` from the repo root. Returns the script's internals plus the
+// MQTT traffic, the RPC calls, the timers it set and the MQTT handlers it installed, so
+// tests can assert on what it published, subscribed to, commanded and scheduled. Each
+// call is a fresh copy with fresh state.
 function load(scriptName) {
   const published = [];
   const subscribed = [];
   const calls = [];
+  const timers = [];
   const handlers = {};
 
   const source =
@@ -66,9 +74,9 @@ function load(scriptName) {
 
   const stubs = {
     Shelly: {
-      // Never calls back, so a script's own init() stalls here rather than starting
-      // timers. The record is what a test asserts a controller did.
-      call: function (method, params) { calls.push({ method: method, params: params }); },
+      // Never calls back, so a script's own init() stalls here rather than
+      // starting timers. The record is what a test asserts a controller did.
+      call: function (method, params) { calls.push({ method, params }); },
       addStatusHandler: function () {},
       addEventHandler: function () {},
       getComponentStatus: function () { return null; },
@@ -81,7 +89,11 @@ function load(scriptName) {
       setDisconnectHandler: function (fn) { handlers.disconnect = fn; },
     },
     Timer: {
-      set: function () { return 1; },
+      // Recorded rather than run: a test decides whether a scheduled callback fires.
+      set: function (ms, repeat, fn) {
+        timers.push({ ms: ms, repeat: repeat, fn: fn });
+        return timers.length;
+      },
       clear: function () {},
     },
     Virtual: {
@@ -109,7 +121,7 @@ function load(scriptName) {
     fs.unlinkSync(tmp);
   }
 
-  return { mod, published, subscribed, calls, handlers };
+  return { mod, published, subscribed, calls, timers, handlers };
 }
 
 module.exports = { load };

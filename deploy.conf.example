@@ -6,11 +6,14 @@
 # SCRIPT_FILE  - Path to JavaScript file
 # SCRIPT_NAME  - Display name for the script
 
-# Smart Load Controllers (4x devices)
-192.168.1.100:1:smart-load-controller.js:Smart Load
-192.168.1.101:1:smart-load-controller.js:Smart Load
-192.168.1.102:1:smart-load-controller.js:Smart Load
-192.168.1.103:1:smart-load-controller.js:Smart Load
+# Dump Load Controllers (4x immersion heaters; one is the lead relay)
+192.168.1.100:1:dump-load-controller.js:Dump Load
+192.168.1.101:1:dump-load-controller.js:Dump Load
+192.168.1.102:1:dump-load-controller.js:Dump Load
+192.168.1.103:1:dump-load-controller.js:Dump Load
+
+# Heat Pump Enable: same script, role resolved from the device ID
+192.168.1.109:1:dump-load-controller.js:Heat Pump Enable
 
 # Thermal Dump Controller (1x device)
 192.168.1.104:1:thermal-dump-controller.js:Thermal Dump
