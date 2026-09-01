@@ -78,6 +78,11 @@ heating relays inherit a rule that is proven rather than inventing a second noti
 trouble. It costs no extra subscription — `vebus/276/State` is already in the topic set —
 and it removes any need to read the generator service or enumerate its condition codes.
 
+The logs bear this out from the other side: on two occasions the Cerbo held the generator
+start relay closed for an hour or more with no AC input ever appearing — a start that
+failed, not a run. VE.Bus stayed Inverting throughout, so this design saw nothing to react
+to, while a rule written on the generator service would have called it a shortage.
+
 It also means inverter overload reaches the heat pump without anyone writing code for it:
 sustained overload starts the generator, the generator takes VE.Bus out of Inverting, and
 the heat pump locks.
@@ -109,9 +114,9 @@ so the two consequences of shortage do not share a trigger:
 | Lock the heat pump, block DHW immersion timers | Shortage — immediately, no exemption |
 | Release the biomass | `SOC < 30%`, or shortage sustained **30 minutes** on the VE.Bus term |
 
-Thirty minutes clears the fortnightly generator test run — 20 minutes of running plus a
-20-minute minimum runtime — without knowing anything about generators at all. It also covers
-every other transient: a brief passthrough, a fault that clears, an overload start.
+Thirty minutes clears the fortnightly generator test run — 20 minutes minimum runtime —
+without knowing anything about generators at all. It also covers every other transient: a
+brief passthrough, a fault that clears, an overload start.
 
 The SOC term keeps its fast path deliberately. In a real shortage the boiler is released at
 30%, well before the generator starts at 20%, so the delay only ever applies to the VE.Bus
@@ -146,16 +151,14 @@ on a VE.Bus one — and infers the cause rather than holding a threshold:
 With no dwell on .209 the inference is exact, give or take one 30-second poll, so .164 needs
 only a token dwell to cover that and no VE.Bus history of its own.
 
-**The 30 minutes needs re-checking against the data before .164 is written.** It is justified
-below as clearing the fortnightly generator test — "20 minutes of running plus a 20-minute
-minimum runtime", which is 40, not 30. Logged excursions run to 32.6 minutes, so the longest
-observed test run would have released the boiler at 98% SOC. 45 minutes looks like the right
-number.
-
 The 30% and 90% numbers therefore exist in exactly one deployment, on one device.
 
-A manual lock of the heat pump for maintenance also blocks timed immersion heating, which is
-the right answer anyway: someone has declared the site short of power.
+The logs bear the 30 minutes out. Every generator run since the dump loads gained their
+VE.Bus gate on 20 February — five of them — took 22.6 minutes, to within a second of each
+other, leaving seven minutes of margin. Two earlier runs reached 32.6 minutes: 23 December
+2025, which ended in the overload recorded in `8d4bf54`, and 20 January 2026. What made
+those two longer is not established — on 23 December the dump loads were off for the whole
+run, so they were not loading the genset. If runs that long recur, 45 minutes covers them.
 
 ---
 
@@ -194,11 +197,11 @@ Live behaviour, for context. Per-script detail is in [README.md](README.md).
 
 **DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
 threshold (96/95, 95/94, 94/93, 96/95) so they stagger rather than all switching at once.
-Each checks that total generation exceeds 500 W before enabling, so a full-reading battery at
-night cannot start a dump, and checks inverter headroom before adding its 2.7 kW. Both
-directions act at once, with no dwell to wait out: a hydro trip takes 2.7 kW off the inverter
-immediately. The lead relay (.90) carries a manual time switch on its input for intentional water
-heating; the others follow it over MQTT.
+Each checks that generation exceeds 500 W before enabling, so a dump is never *started* out
+of the battery when renewables are short, and checks inverter headroom before adding its
+2.7 kW. Turn-off is purely SOC and waits out no dwell: once the low threshold is crossed,
+2.7 kW comes off the inverter at once. The lead relay (.90) carries a manual time switch on
+its input for intentional water heating; the others follow it over MQTT.
 
 **Buffer immersions** — `surplus-dump-controller.js` on the dimmer allocates surplus
 sequentially across the two Pro 2PM channels, the Pro 1PM carrying immersion 4, and its
@@ -219,7 +222,7 @@ check, but the two operate independently. With several dump loads active on high
 that then drops away — a hydro trip — the combined load plus house consumption can exceed
 inverter capacity until loads cycle off on SOC hysteresis. The heat pump does not add to this
 risk directly, since it is not gated on surplus, but it is 3–5 kW of the house load the
-calculation starts from.
+calculation starts from — prioritising the heat pump over any dumps/immersions is correct.
 
 ---
 
