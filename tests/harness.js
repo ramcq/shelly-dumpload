@@ -32,6 +32,8 @@ const EXPORTED = [
   "isLoadStalled",
   "isDumpLoadStalled",
   "getDumpLoadState",
+  // dump-load-controller
+  "connectMqtt",
   // common
   "setupMqttSubscriptionsAndKeepalive",
   "processMqttMessage",
@@ -49,27 +51,34 @@ function exportsLine() {
 
 let loadCounter = 0;
 
-// Load `scriptName` from the repo root. Returns the script's internals plus the
-// MQTT traffic it produced, so tests can assert on what it published and
-// subscribed to. Each call is a fresh copy with fresh state.
+// Load `scriptName` from the repo root. Returns the script's internals plus the MQTT
+// traffic, the RPC calls and the MQTT handlers it installed, so tests can assert on what
+// it published, subscribed to, commanded and registered. Each call is a fresh copy with
+// fresh state.
 function load(scriptName) {
   const published = [];
   const subscribed = [];
+  const calls = [];
+  const handlers = {};
 
   const source =
     fs.readFileSync(path.join(REPO_ROOT, scriptName), "utf8") + exportsLine();
 
   const stubs = {
     Shelly: {
-      call: function () {},
+      // Never calls back, so a script's own init() stalls here rather than starting
+      // timers. The record is what a test asserts a controller did.
+      call: function (method, params) { calls.push({ method: method, params: params }); },
       addStatusHandler: function () {},
+      addEventHandler: function () {},
       getComponentStatus: function () { return null; },
+      getComponentConfig: function () { return null; },
     },
     MQTT: {
       subscribe: function (topic) { subscribed.push(topic); },
       publish: function (topic, payload) { published.push({ topic, payload }); },
-      setConnectHandler: function () {},
-      setDisconnectHandler: function () {},
+      setConnectHandler: function (fn) { handlers.connect = fn; },
+      setDisconnectHandler: function (fn) { handlers.disconnect = fn; },
     },
     Timer: {
       set: function () { return 1; },
@@ -100,7 +109,7 @@ function load(scriptName) {
     fs.unlinkSync(tmp);
   }
 
-  return { mod, published, subscribed };
+  return { mod, published, subscribed, calls, handlers };
 }
 
 module.exports = { load };
