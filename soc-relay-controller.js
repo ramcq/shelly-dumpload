@@ -43,6 +43,7 @@ let config = {
 
   // Timing settings. There are no dwell timers: SOC control does not chatter, and the
   // measured cycling rate is decades inside the relay's rating. See CONTROLS.md.
+  initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
   identityRetryDelay: 5 * 1000, // ms - between attempts to read the device ID
   startupGrace: 3 * 60 * 1000,  // ms - how long the VE.Bus gate waits for its first reading
                                 // before treating silence as trouble. Covers a Cerbo boot
@@ -595,16 +596,18 @@ function handleMqttConnected() {
     logDebug("Subscribed to lead relay: " + state.leadRelayTopic);
   }
 
-  // Send initial keepalive
-  sendKeepalive(false);
+  // Ask for a full republish, but not in the same breath as the subscriptions above: sent
+  // together, the burst that answers it arrives before they are live and is missed.
+  Timer.set(config.initialKeepaliveDelay, false, function() {
+    sendKeepalive(false);
+  });
 
   // Setup periodic keepalive (every 30 seconds).
   //
-  // Keep asking for a full republish until the VE.Bus state has actually been seen. The
-  // broker publishes nothing until a value changes, so the only chance at a state that
-  // changes as rarely as this one is a republish - and the subscriptions above are not
-  // reliably live in time for the burst the first keepalive triggers. Everything else in
-  // the topic set changes every few seconds and so arrives regardless.
+  // Keep asking for a republish until the VE.Bus state has actually been seen, in case the
+  // delay above was not enough. The broker publishes nothing until a value changes, so a
+  // state that changes as rarely as this one is only ever seen in a republish. Everything
+  // else in the topic set changes every few seconds and so arrives regardless.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }

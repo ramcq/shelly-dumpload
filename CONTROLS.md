@@ -407,8 +407,10 @@ empty-payload keepalive triggers. Subscriptions are not reliably live in time fo
 following the first keepalive, so a controller can start up and never see `vebus/276/State`
 — which changes only when a generator runs, months apart. Every other topic in the set
 changes every few seconds and arrives regardless, so this fails on exactly the one the gate
-depends on. The keepalive therefore keeps requesting a republish until that state has been
-seen. Observed on .209 on first deployment, 1 September 2026.
+depends on. So the first keepalive waits a second after subscribing, and the periodic one
+keeps asking for a republish until that state has been seen: the delay makes the ordinary
+case immediate, the retry keeps it correct when the delay is not enough. Observed on .209 on
+first deployment, 1 September 2026.
 
 Shelly status notifications are published on change and are **not** retained, so a script
 that follows another device sees nothing until that device next changes state. Every

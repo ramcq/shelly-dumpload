@@ -525,3 +525,17 @@ test("keepalives keep requesting a republish until VE.Bus has been seen", () => 
   assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
     "once seen, stop asking the whole system to republish every 30 seconds");
 });
+
+test("the first republish request waits for the subscriptions to land", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+
+  assert.deepStrictEqual(published, [],
+    "a keepalive sent in the same breath as the subscriptions loses the burst it asks for");
+
+  const delayed = timers.filter((t) => t.repeat === false).pop();
+  assert.strictEqual(delayed.ms, mod.config.initialKeepaliveDelay);
+
+  delayed.fn();
+  assert.strictEqual(published[0].payload, "", "the delayed one must ask for a republish");
+});
