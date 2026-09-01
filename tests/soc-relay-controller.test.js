@@ -12,7 +12,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const { load } = require("./harness.js");
 
-const DUMP = "dump-load-controller.js";
+const DUMP = "soc-relay-controller.js";
 
 const HEAT_PUMP_ENABLE = "shelly1minig3-d885ac0a3668"; // .209
 const LEAD_RELAY = "shellypmg3-543204558fc8"; // .90, Left Bottom

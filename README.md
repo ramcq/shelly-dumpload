@@ -83,13 +83,13 @@ which device and channel a stage actually commands, the
 [initialisation](#seeding-state-from-other-devices) — the last two because both fail by
 stopping the whole controller, not just the stage being changed.
 
-`dump-load-controller.js` runs in two roles from one file, so its tests assert both: that
+`soc-relay-controller.js` runs in two roles from one file, so its tests assert both: that
 the shortage lead drops every dump-load gate, and that the immersions keep every one of
 them.
 
 ## Scripts Overview
 
-### dump-load-controller.js
+### soc-relay-controller.js
 **Device:** Shelly Plus 1PM Gen3 (DHW immersions), Shelly 1 Mini Gen3 (Heat Pump Enable)
 **Purpose:** Relay on above a high SOC threshold, off below a low one, gated on VE.Bus state
 
@@ -290,7 +290,7 @@ Scripts create virtual components for:
 Scripts use `Shelly.addEventHandler()` and `Shelly.addStatusHandler()` to react to changes immediately rather than polling.
 
 ### Dwell Timers
-`dump-load-controller.js` has none. A year of logged SOC replayed against its thresholds with
+`soc-relay-controller.js` has none. A year of logged SOC replayed against its thresholds with
 no timers gives under five relay operations a day — decades inside the relay's rating — and
 SOC cannot chatter the way the old frequency signal could, because a load coming on bends the
 slope of an integral rather than cancelling the reading.
@@ -354,7 +354,7 @@ let config = {
 ### Typical Off-Grid Dump Load System
 
 1. **surplus-dump-controller.js** - Run on dimmer device for intelligent surplus management
-2. **dump-load-controller.js** - Run on multiple 1PM devices with lead relay coordination
+2. **soc-relay-controller.js** - Run on multiple 1PM devices with lead relay coordination
 3. **thermal-dump-controller.js** - Run on 2PM controlling pump/fan for heat recovery
 
 How these are combined at Muttonhall, including the thresholds each instance runs, is in [CONTROLS.md](CONTROLS.md).
@@ -369,7 +369,7 @@ debugMode: true  // or config.debugMode = true
 ```
 
 Debug messages appear in Shelly console with prefixes:
-- `[DEBUG-DUMP]` - dump-load-controller.js
+- `[DEBUG-DUMP]` - soc-relay-controller.js
 - `[DEBUG-SURPLUS]` - surplus-dump-controller.js
 - `[DEBUG-THERMAL]` - thermal-dump-controller.js
 
@@ -378,7 +378,7 @@ Debug messages appear in Shelly console with prefixes:
 Each controller writes a status summary to a virtual text component. You can fetch it directly via HTTP:
 
 ```bash
-# dump-load-controller (text:204)
+# soc-relay-controller (text:204)
 wget -qO- http://<device>/rpc/Text.GetStatus?id=204
 
 # surplus-dump-controller, thermal-dump-controller (text:200)
