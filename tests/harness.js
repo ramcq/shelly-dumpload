@@ -34,11 +34,16 @@ const EXPORTED = [
   "getDumpLoadState",
   // soc-relay-controller
   "applySettingsForDevice",
+  "inShortage",
+  "updateShortageLatch",
+  "shortageReason",
   "setupVirtualComponents",
   "handleMqttConnected",
   "connectMqtt",
   "recordSwitchTime",
-  "assignLeadRelayTopic",
+  "assignFollowedTopics",
+  "requestFollowedStatus",
+  "seedLatchFromRelay",
   "determineDeviceIdentity",
   "finishSetup",
   // common

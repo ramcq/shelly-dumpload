@@ -12,18 +12,19 @@ The division of labour across the documentation:
 | [POWER.md](POWER.md) | The electrical installation and the device inventory |
 | [HEATING.md](HEATING.md) | The heating plant — hydraulics, zones, wiring, commissioning |
 | **CONTROLS.md** | The system — states, thresholds, who decides what, and why |
-| [CONTEXT.md](CONTEXT.md) | The vocabulary all four use |
+| [CONTEXT.md](CONTEXT.md) | The vocabulary every document here uses |
+| [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
 
 **Status.** The dump load side is live and has been for months. On the heating side the
-heat pump lock is written and the other two relays are not.
+heat pump lock is written, and the immersions shed with it; the other two relays are not.
 
 | Behaviour | State |
 |---|---|
 | DHW immersions on SOC thresholds, with a manual time switch | Live |
 | Buffer immersions tracking surplus | Live |
 | Thermal recovery from stalled buffer immersions | Live |
-| Shortage and the heat pump lock | Written, not yet deployed |
-| Immersion floor in shortage, biomass release, DHW enable | **Designed only** |
+| Shortage, the heat pump lock and the immersions shedding with it | Written, not yet deployed |
+| Biomass release, DHW enable | **Designed only** |
 
 ---
 
@@ -34,28 +35,50 @@ forecasts is out. That is no real loss: battery SOC is the integral of generatio
 consumption, so it already contains the energy balance. Rate of change, cumulative deficit
 and "the generator ran" are the same signal read differently.
 
-So there is one state — **shortage** — on two terms:
+So there is one state — **shortage** — and it is a function of three readings, not a state
+machine with a history:
 
-| | |
+| Term | |
 |---|---|
-| Enter | SOC at or below **30%**, or VE.Bus state is anything other than Inverting (9) |
-| Leave | SOC at or above **90%** and VE.Bus back to Inverting |
+| VE.Bus | Anything other than Inverting (9) is shortage, whatever the latch says |
+| SOC at or below **30%** | Latch on |
+| SOC at or above **90%** | Latch off |
+| Between the two | The latch holds |
+| A controller that has never resolved its latch | Shortage, until generation exceeds **500 W** |
 | Unknown or stale VE.Bus state | Counts as not inverting |
-| No VE.Bus state yet, within three minutes of starting | Counts as nothing: no action either way |
+| No reading yet, within three minutes of starting | Counts as nothing: no action either way |
 
-The band is 60 points wide — some 28 kWh across the three batteries currently connected — so
-the SOC term cannot chatter and needs no dwell timer. **There are no dwell timers at all**,
-here or on the immersions: a year of logged SOC, replayed against these thresholds with no
-timers, gives under five relay operations a day, which is decades inside the relay's rating.
-The VE.Bus term does not chatter either — 31 excursions in 184 days, median 12 minutes, none
-of them oscillating. A dwell would bound a rate that is already low and would make the open
-relay ambiguous to every follower for as long as it lasted.
+**The latch is not an implementation detail — it is what stops the system cycling.** The
+loads shortage sheds are the same loads that move SOC, so a rule reading only the present
+would shed at 30%, watch the battery recover to 31% on the load it had just dropped,
+un-shed, and be back at 30% a quarter of an hour later. At 1.5 kW of hydro against a 3 kW
+heat pump that is a 40-minute cycle, all day, and the immersions join it whenever the time
+switch is calling. The 60-point band is wide for exactly this reason.
 
-Both terms therefore share one exit: SOC at or above 90% with VE.Bus back to Inverting. A
-VE.Bus excursion that clears while SOC sits mid-band would leave the heat pump locked until
-the battery next reaches 90%. In 184 days of logged VE.Bus data that has not happened — all
-31 excursions began above 97% — so the case is left unhandled rather than carrying machinery
-for it.
+**The latch lives on .209, and its durable copy is the relay contact.** The contact survives
+a script restart, and the switch's last-command source tells that apart from an untouched
+contact, where the relay is only `initial_state: "on"`: nothing but a command moves it, so a
+source of `init` is a configuration default rather than a decision. So a redeploy does not
+discard what the relay already knew, and a script deployed hours into a boot does not read a
+default as a released heat pump.
+
+On a genuinely fresh boot between the thresholds, generation supplies the initial value: the
+controller cannot know which way the battery was going, so it assumes shortage — the safe
+end — and clears when it sees more than 500 W of hydro or solar. See
+[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
+
+Shortage is the safe assumption because of what a mid-band state of charge with no renewable
+generation actually is: a significantly degraded system, where the generator is starting
+periodically to top the battery up for the house. Between those runs VE.Bus is back to
+Inverting and SOC sits somewhere in the band, so no instantaneous term catches it. The
+assumption is the only thing standing between a fresh boot and a 3–5 kW heat pump running on
+diesel.
+
+**There are no dwell timers.** A year of logged SOC replayed against these thresholds gives
+under five relay operations a day, decades inside the relay's rating. The VE.Bus term does
+not chatter either — 31 excursions in 184 days, median 12 minutes, none oscillating. A dwell
+would be the wrong tool for the cycling above in any case: a 30-minute hold makes that cycle
+*shorter*, not longer.
 
 An absent reading is not a stale one. The controller polls immediately on start, before
 MQTT has connected, so a gate that locked on the state it had not received yet would lock
@@ -63,8 +86,8 @@ the heat pump on every redeploy — for a reading that arrives seconds later. Th
 grace covers only the case of never having had a reading, and is not restored by a broker
 dropping later: once a state has been seen, silence is trouble again immediately. Three
 minutes, because after a site-wide outage the Cerbo starts booting well after the Shelly
-has finished. Without it, every redeploy would publish a brief false shortage to every
-follower.
+has finished. Without it, every redeploy would lock the heat pump and shed four immersions
+for the second or two before the first reading landed.
 
 ### Why VE.Bus state, rather than "the generator is running"
 
@@ -87,22 +110,27 @@ It also means inverter overload reaches the heat pump without anyone writing cod
 sustained overload starts the generator, the generator takes VE.Bus out of Inverting, and
 the heat pump locks.
 
-### Why 30% to enter
+### Why 30%
 
 Ten points above the generator's 20% autostart, which at a realistic deficit is around an
 hour. An hour is enough, because the heat pump lock is instantaneous and the biomass makes
-heat in 10–15 minutes. Either the generation is sufficient to catch up once the heat pump is
-off, or it is not; nothing in between needs a wider margin.
+heat in 10–15 minutes. Below this the answer is the same whatever is coming in: there is not
+enough time left to find out whether generation would have caught up.
 
-### Why 90% to leave
+### Why 90%
 
-The generator stops charging at 80%, so **the last ten points can only come from hydro or
-solar**. The exit condition is therefore a test for "renewables are actually back" that a
-diesel run cannot fake.
+The generator stops charging at 80%, so above 90% the battery cannot have got there on
+diesel. Nothing above that point needs a second opinion.
 
-Leaving at 80% instead would re-enable a 3–5 kW heat pump onto a battery the generator had
-just filled, with no generation behind it: back to 20% within the day, two or three diesel
-starts every day of the winter, which is the outcome the biomass exists to prevent.
+Between the two, the latch holds, and only a controller that has never resolved one asks
+generation. That question — "is anything meaningfully coming in" — is the same one the
+90% threshold answers by proxy, inferred from a diesel run stopping at 80%; reading the
+meters answers it directly and immediately, which is what a fresh boot needs.
+
+Keeping the VE.Bus term outside the latch fixes a case the old design left unhandled: a
+generator run or a passthrough that clears while SOC sits mid-band used to leave the heat
+pump locked until the battery next reached 90%, and now returns the system to whatever the
+latch already said.
 
 ### Shedding is not the same as making heat
 
@@ -111,7 +139,7 @@ so the two consequences of shortage do not share a trigger:
 
 | Action | Condition |
 |---|---|
-| Lock the heat pump, block DHW immersion timers | Shortage — immediately, no exemption |
+| Lock the heat pump, shed the DHW immersions and their timers | Shortage — immediately, no exemption |
 | Release the biomass | `SOC < 30%`, or shortage sustained **30 minutes** on the VE.Bus term |
 
 Thirty minutes clears the fortnightly generator test run — 20 minutes minimum runtime —
@@ -122,23 +150,38 @@ The SOC term keeps its fast path deliberately. In a real shortage the boiler is 
 30%, well before the generator starts at 20%, so the delay only ever applies to the VE.Bus
 term, where nothing is lost by waiting.
 
+A shortage a controller assumed at startup, and has not yet cleared, is a third case: it
+means nobody knows, not that anything is wrong. It waits the same 30 minutes as the VE.Bus
+term, since the first generation reading above 500 W settles it.
+
 ---
 
 ## Who decides, and how the decision travels
 
-**Heat Pump Enable (.209) determines shortage.** The device whose entire job is "am I allowed to
-run" decides whether it is allowed to run. It subscribes to SOC and VE.Bus state, applies
-the thresholds above, and switches its own relay — which is the Grant's heat pump lock, so
-the decision and its primary consequence are the same action.
+**Heat Pump Enable (.209) determines shortage.** The device whose entire job is "am I
+allowed to run" decides whether it is allowed to run. It subscribes to SOC, VE.Bus state and
+both generation figures, applies the terms above, and switches its own relay — which is the
+Grant's heat pump lock, so the decision and its primary consequence are the same action.
 
 **The relay is the shortage state, expressed physically.** Everything else observes it over
-MQTT at `shelly1minig3-d885ac0a3668/status/switch:0`: relay closed means running, relay open
-means shortage. No retained flag, no staleness question, no second copy of a threshold.
+MQTT at `shelly1minig3-d885ac0a3668/status/switch:0`: relay closed means the heat pump is
+running, relay open means shortage. No retained flag, no second copy of a threshold.
 
 | Follower | Reads | Does |
 |---|---|---|
-| DHW immersions (.88 .90 .91 .100) | .209 switch status | Blocks time-switch propagation while open |
-| Boiler Release (.164) | .209 switch status, plus `vebus/276/State` | Releases the boiler on sustained shortage |
+| DHW immersions (.88 .90 .91 .100) | .209's switch status | Sheds, time switch included, while it is open |
+| Boiler Release (.164) | .209's switch status, plus `vebus/276/State` | Releases the boiler on sustained shortage |
+| DHW Enable (.123) | .209's switch status | Opens a shortage DHW window |
+
+**What travels is the lock, not shortage.** A follower asks "is the heat pump running", which
+is what it actually wants to know: the biomass supplements when the heat pump is not running,
+and DHW comes from the buffer when the heat pump cannot make it. That keeps the heating side
+out of the power system entirely — the shortage rule needs four Victron subscriptions, and
+.123 would have reached eight of Shelly's ten carrying them, for a script whose job is moving
+heat between vessels.
+
+It also makes manual control a first-class operation. Stop .209's script, put its relay where
+you want it, and the biomass and DHW relays follow. Nothing recomputes around you.
 
 .164 needs to distinguish the two terms — release now on a battery shortage, wait 30 minutes
 on a VE.Bus one — and infers the cause rather than holding a threshold:
@@ -151,14 +194,13 @@ on a VE.Bus one — and infers the cause rather than holding a threshold:
 With no dwell on .209 the inference is exact, give or take one 30-second poll, so .164 needs
 only a token dwell to cover that and no VE.Bus history of its own.
 
-The 30% and 90% numbers therefore exist in exactly one deployment, on one device.
+The 30, 90 and 500 W numbers therefore exist in exactly one deployment, on one device.
 
-The logs bear the 30 minutes out. Every generator run since the dump loads gained their
-VE.Bus gate on 20 February — five of them — took 22.6 minutes, to within a second of each
-other, leaving seven minutes of margin. Two earlier runs reached 32.6 minutes: 23 December
-2025, which ended in the overload recorded in `8d4bf54`, and 20 January 2026. What made
-those two longer is not established — on 23 December the dump loads were off for the whole
-run, so they were not loading the genset. If runs that long recur, 45 minutes covers them.
+Every follower picks up the current value at startup by publishing `status_update` to
+.209's command topic, which makes it republish on the status topic the follower already
+subscribes to. A follower that never hears an answer sheds nothing: an undeployed or
+unreachable .209 costs the immersion floor and nothing else, and every follower keeps its
+own gates beneath it.
 
 ---
 
@@ -167,7 +209,7 @@ run, so they were not loading the genset. If runs that long recur, 45 minutes co
 | Actuator | Rule |
 |---|---|
 | Heat Pump Enable (.209) | Closed unless in shortage |
-| DHW immersions (`soc-relay-controller.js`) | Existing surplus-SOC behaviour, plus a floor: time switch propagation blocked while .209 is open |
+| DHW immersions (`soc-relay-controller.js`) | Shed while the lock is open, time switch included; otherwise the surplus-SOC behaviour |
 | Buffer immersions (`surplus-dump-controller.js`) | Surplus tracking across three constant stages and the dimmer |
 | Boiler Release (.164) | Released on sustained shortage, **or** H1, **or** DHW demand, **or** exercise |
 | DHW Enable (.123) | The time clock, unconditionally; **or** a shortage DHW window |
@@ -181,6 +223,17 @@ Once released, the boiler needs no burn scheduling. It has its own 70 °C buffer
 stops when the buffer is charged, so releasing a boiler that has nothing to do is free and
 nothing here second-guesses it. Roughly an hour per burn: 1500 L from 40 to 70 °C is ~52 kWh
 of heat, displacing ~16 kWh of electricity at CoP 3.3.
+
+**The floor holds against the time switch on a generator run too.** A generator start takes
+VE.Bus out of Inverting, which is a shortage term, so the lock opens and the immersions shed
+even where the time switch is asking. Today they would run: the VE.Bus gate sits below the
+time switch in the ladder and never sees a calling clock. Honouring the whole lock rather
+than just its battery term is the simpler rule — one boolean, one reading — and it keeps the
+escape hatch in one place: stop .209's script and put its relay where you want it, and the
+heat pump and the immersions are released together. Stopping it first is the whole hatch —
+a running script re-asserts the latch on its next poll, so a contact closed by hand under it
+is turned back within thirty seconds. The cost is up to 2.7 kW less load on a genset that is
+running anyway, which may lengthen a run.
 
 **The lead relay's hardware follow fights the shortage floor, briefly.** 192.168.1.90 is
 `in_mode: "follow"`, so the time switch closes it in hardware and the script has to turn it
@@ -350,7 +403,7 @@ absorb surplus and has no prior behaviour to preserve, it means off.
 
 | Relay | Configuration | Unscripted behaviour |
 |---|---|---|
-| Heat Pump Enable (.209) | `detached`, `initial_state: "on"` | Heat pump runs. Nothing is wired to its input, so `match_input` would lock the heat pump out on every power cycle |
+| Heat Pump Enable (.209) | `detached`, `initial_state: "on"`, no `auto_on`/`auto_off` | Heat pump runs, which is what should happen with no script. Nothing is wired to its input, so `match_input` would lock the heat pump out on every power cycle. The script reads the latch back off this contact and trusts any command that moved it, so a device timer would be indistinguishable from a decision |
 | Boiler Release (.164) | `follow`, `match_input` | H1 releases the boiler in hardware — the bivalent survives a dead script, which matters because the relay is normally-open and cannot be rewired for a changeover contact |
 | DHW Enable (.123) | `follow`, `match_input` | The time clock passes straight through, exactly as before the Shelly existed |
 | Buffer immersions (.65, .161) | `detached`, `initial_state: "off"` | Nothing dumps. `follow` would let an input edge override the controller, and 2.69 kW should not latch on at boot with no surplus behind it and no script yet running |
@@ -366,22 +419,21 @@ or the lead relay closed for its own reasons without giving up the hardware path
 
 | Script | Device | Derived from | Job | State |
 |---|---|---|---|---|
-| `soc-relay-controller.js` | .209 | existing, reconfigured | Determine shortage: 90% on, 30% off, VE.Bus gate, no generation gate, no headroom check | Written |
-| `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; block time switch propagation in shortage | To do |
+| `soc-relay-controller.js` | .209 | existing, reconfigured | Express shortage on its relay; no dump load gates | Written |
+| `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; shed while it is open, time switch included | Written |
 | `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run | To do |
 | `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status | To do |
 
-.209 runs the same file as the four DHW immersions. Structurally it is the same controller —
-relay on above a high SOC threshold, off below a low one, gated on VE.Bus state, with a
-minimum time in state — so the proven MQTT, keepalive and re-entrancy code stays in one
-place.
+.209 runs the same file as the four DHW immersions. They share the shortage rule, and above
+it the proven MQTT, keepalive and re-entrancy code, so one file is the honest arrangement:
+what differs is a row in a table, not a program.
 
-**The role is resolved from the device ID at startup**, the way the lead relay already is,
-because `deploy.py` uploads one file unaltered and the four immersions must keep behaving
-exactly as they do. Matching `d885ac0a3668` pins the thresholds at 90/30 and drops all three
-dump-load gates: `minGenerationPower: 0` for the generation gate, `inverter.heaterPower: 0`
-for the headroom check and the overload fast-path, and `followTimeSwitch: false` so neither
-its own input nor the lead relay's can unlock the heat pump.
+**The row is matched on the device ID at startup**, because `deploy.py` uploads one file
+unaltered. `shortageLead: true` drops all three dump-load gates —
+`minGenerationPower: 0` for the generation gate, `inverter.heaterPower: 0` for the headroom
+check and the overload fast-path, and `followTimeSwitch: false` so neither its own input nor
+the lead relay's can unlock the heat pump — and gives it no SOC band of its own, since its
+relay is the shortage terms rather than a dump load's threshold.
 
 **No threshold is exposed on any device.** Every relay's numbers live in one table in the
 file, matched on the ID the device reports at startup. They are properties of the system
@@ -395,15 +447,14 @@ where the two had already disagreed about .90 and .91. A persisted component lef
 either script is now ignored rather than read. Immersions still derive their low threshold
 as `high - 1`; only a band too wide to derive is stated outright.
 
-An identity that cannot be read is retried rather than guessed, and the controller commands
-nothing until it succeeds. Falling back to the dump load defaults would run .209 as an
-immersion — locked below 95%, shed by the overload path, unlocked by whatever floats on an
-unused input — whereas doing nothing leaves every relay in the unscripted behaviour the
-configuration table above guarantees.
+An identity that cannot be read is retried rather than guessed, and a device the table does
+not list runs nothing at all. Either way the controller commands nothing, which leaves every
+relay in the unscripted behaviour the configuration table above guarantees — where guessing
+would have run .209 as an immersion, locked below 95% and shed by the overload path.
 
-The script also asserts `status_ntf` in the device's MQTT config. Every follower reads
-.209's published switch status and nothing else, so a device with status notifications off
-is a controller whose decision never leaves it.
+The script asserts `status_ntf` in the device's MQTT config. Every follower reads .209's
+published switch status, and the immersions read the lead relay's input, so a device with
+status notifications off is a controller whose decision never leaves it.
 
 The Victron broker behaves the same way, and worse for a value that rarely changes: it
 publishes nothing until a value changes, and the one chance at the rest is the republish an
@@ -427,9 +478,10 @@ window ignores the time switch until the clock next moves.
 
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under
-it. So the topic sets stay deliberately small: the existing controllers run five or six each.
-Defining shortage on VE.Bus state rather than on the generator service is part of what keeps
-the heating relays clear of it.
+it. So the topic sets stay deliberately small: the immersions run seven — five Victron
+paths, the lead relay's input and .209's switch — and .209 runs five. Following the lock
+rather than deriving it is what keeps .164 at two and .123 at five; deriving it would have
+cost each of them the four Victron paths the terms rest on.
 
 ### Prerequisites
 

@@ -23,9 +23,16 @@ let config = {
 
   // Lead relay (has manual time switch connected to its input)
   leadRelay: {
-    deviceId: "543204558fc8", // Device ID of the lead relay
     inputTopic: "shelly1pmg3-543204558fc8/status/input:0", // MQTT topic for lead relay input
     commandTopic: "shelly1pmg3-543204558fc8/command"       // where to ask it to republish
+  },
+
+  // The heat pump lock (.209). A dump load follows this rather than working shortage out
+  // for itself: closed means the heat pump is running, open means the system is short.
+  // One boolean, so the heating relays need nothing from the power system either.
+  heatPumpLock: {
+    statusTopic: "shelly1minig3-d885ac0a3668/status/switch:0",
+    commandTopic: "shelly1minig3-d885ac0a3668/command"
   },
 
   // Every device this file runs on, matched on the ID it reports at startup. The
@@ -41,10 +48,23 @@ let config = {
     { id: "543204558fc8", name: "DHW Left Bottom",  high: 94, leadRelay: true },
     { id: "dcda0ce04fb0", name: "DHW Right",        high: 95 },
     { id: "dcda0ce06e98", name: "DHW Annex",        high: 96 },
-    // Not a dump load: 90 to leave shortage, above what a generator run reaches, and 30 to
-    // enter, ten points above the generator's autostart.
-    { id: "d885ac0a3668", name: "Heat Pump Enable", high: 90, low: 30, shortageLead: true }
+    // Not a dump load and has no SOC band of its own: its relay is shortage, expressed.
+    { id: "d885ac0a3668", name: "Heat Pump Enable", shortageLead: true }
   ],
+
+  // Shortage, worked out by the shortage lead alone and expressed on its relay. Everything
+  // else reads the relay, so these numbers exist in one deployment, on one device.
+  shortage: {
+    lowSoc: 30,        // % - at or below this the system is short. Ten points above the
+                       // generator's autostart
+    highSoc: 90,       // % - at or above it is not. Above what a generator run reaches,
+                       // since the generator stops charging at 80
+    minGeneration: 500 // W - settles a controller that started between the two and cannot
+                       // know which way the battery was going. "Is any hydro or solar
+                       // meaningfully generating", against up to 20 kW of connected
+                       // capacity. Separate from config.minGenerationPower, which a role
+                       // may disable
+  },
 
   // Inverter overload protection
   inverter: {
@@ -98,6 +118,7 @@ let state = {
   isLeadRelay: false,        // True if this device is the lead relay
   isShortageLead: false,     // True if this device owns the shortage decision
   leadRelayTopic: "",        // MQTT topic to monitor for lead relay input
+  lockTopic: "",             // MQTT topic to monitor for the heat pump lock
 
   // Relay control state
   startedAt: Date.now(),     // When this script started, for the startup grace
@@ -111,6 +132,8 @@ let state = {
   acGeneration: 0,           // AC-coupled generation power (W)
   dcGeneration: 0,           // DC-coupled generation power (W)
   vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting, etc.)
+  shortageLatch: null,       // Shortage between the thresholds: true, false, or null for
+                             // a controller that has not yet resolved which
   vebusReceived: false,      // Whether a VE.Bus state has ever arrived. Not cleared on a
                              // broker drop: a stale reading is trouble, an absent one is
                              // only a controller that has just started
@@ -119,6 +142,12 @@ let state = {
   // Lead relay state
   leadInputActive: false,    // State of the lead relay's input (manual time switch)
   leadInputReceived: false,  // Whether that state was ever published rather than assumed
+
+  // The heat pump lock, as published by .209. Kept across a broker drop: silence is not
+  // .209 saying the battery recovered, and the reconnect asks it again anyway.
+  lockIsClosed: false,       // Closed means the heat pump is running: no shortage
+  lockKnown: false,          // Never having heard masks nothing, so an undeployed or
+                             // unreachable .209 leaves this relay exactly as it was
 
   // Control settings, taken from the relay table once this device knows which one it is
   deviceName: "",
@@ -170,8 +199,12 @@ function applySettingsForDevice(deviceId) {
     state.deviceName = relay.name;
     state.isLeadRelay = relay.leadRelay === true;
     state.isShortageLead = relay.shortageLead === true;
-    state.highSocThreshold = relay.high;
-    state.lowSocThreshold = relay.low !== undefined ? relay.low : relay.high - 1;
+    // A row without a band is a relay with no dump load behaviour to have one: the
+    // shortage lead returns above the SOC term and never consults these.
+    if (relay.high !== undefined) {
+      state.highSocThreshold = relay.high;
+      state.lowSocThreshold = relay.low !== undefined ? relay.low : relay.high - 1;
+    }
 
     if (state.isShortageLead) {
       // An enable, not a dump load: it runs regardless of surplus, has nothing to shed on
@@ -185,6 +218,102 @@ function applySettingsForDevice(deviceId) {
   }
 
   return false;
+}
+
+// The SOC term, latched: on at or below 30%, off at or above 90%, and between the two it
+// holds - or, if it has never been resolved, generation settles it. Why the band is 60
+// points wide, and why an unresolved latch assumes shortage, are in CONTROLS.md; the
+// durable copy of the answer is this device's own relay contact, read back by
+// seedLatchFromRelay.
+//
+// Nothing here reads the VE.Bus term. That term overlays the latch rather than gating it
+// (see inShortage), so the SOC terms settle without waiting on it.
+function updateShortageLatch() {
+  // Only the shortage lead keeps one. A dump load reads the lock and holds no opinion of
+  // its own about the battery.
+  if (!state.isShortageLead || state.currentSoc <= 0) {
+    return;
+  }
+
+  if (state.currentSoc <= config.shortage.lowSoc) {
+    state.shortageLatch = true;
+  } else if (state.currentSoc >= config.shortage.highSoc) {
+    state.shortageLatch = false;
+  } else if (state.shortageLatch === null &&
+             state.acGeneration + state.dcGeneration > config.shortage.minGeneration) {
+    state.shortageLatch = false;
+  }
+}
+
+// .209's relay contact is the one durable copy of the latch: it survives a script restart,
+// and init() has already read it back into state.relayIsOn. Trust it only where a command
+// could have put it there. Nothing but a command moves the contact, so the switch's own
+// last-command source settles that: `init` means `initial_state` restored at boot and
+// nothing since, which is a configuration default rather than a decision - and on a device
+// whose default is closed, reading it as one releases the heat pump onto diesel. One
+// question answers both a fresh boot and a script deployed hours into one.
+function seedLatchFromRelay() {
+  if (!state.isShortageLead) {
+    return;
+  }
+
+  let switchStatus = Shelly.getComponentStatus("switch:0");
+
+  if (!switchStatus || switchStatus.source === "init") {
+    logDebug("Nothing has commanded the contact - no latch to read");
+    return;
+  }
+
+  state.shortageLatch = !state.relayIsOn;
+  console.log("Latch read from the relay contact: " +
+             (state.shortageLatch ? "shortage" : "no shortage"));
+}
+
+// Shortage: the latch, or the VE.Bus term, which is instantaneous and overlays it. Keeping
+// them separate is what lets a generator run that ends mid-band return the system to
+// wherever it was, rather than holding it locked until the battery next reaches 90%.
+//
+// An unresolved latch counts as shortage. Null while nothing has been heard at all: an
+// absent reading is not a stale one.
+function inShortage() {
+  if (!state.vebusReceived) {
+    // The first poll happens before MQTT has connected and the Cerbo boots slower than the
+    // Shelly, so silence is only trouble once the grace has run out.
+    return (Date.now() - state.startedAt < config.startupGrace) ? null : true;
+  }
+
+  if (state.vebusState !== 9) {
+    return true;
+  }
+
+  if (state.currentSoc <= 0) {
+    return null;
+  }
+
+  return state.shortageLatch !== false;
+}
+
+// Which reading is missing, for the two ways inShortage() can answer nothing at all: no
+// VE.Bus state yet within the grace, or a VE.Bus state and no SOC behind it.
+function unresolvedReason() {
+  return state.vebusReceived ? "no SOC reading yet" : "nothing heard from the Cerbo yet";
+}
+
+// Which term is short, for the log line and the status text.
+function shortageReason() {
+  if (!state.vebusReceived || state.vebusState !== 9) {
+    return "VE.Bus " + getVebusStateString(state.vebusState);
+  }
+
+  if (state.shortageLatch === null) {
+    return "SOC " + state.currentSoc + "%, no generation seen yet";
+  }
+
+  if (state.currentSoc <= config.shortage.lowSoc) {
+    return "SOC " + state.currentSoc + "%";
+  }
+
+  return "SOC " + state.currentSoc + "%, held until " + config.shortage.highSoc + "%";
 }
 
 function getVebusStateString(vebusState) {
@@ -207,12 +336,30 @@ function getVebusStateString(vebusState) {
 // Update the status display
 function updateStatus(event) {
   let socPart = state.currentSoc > 0 ? state.currentSoc + "%" : "No SOC";
-  let thresholdInfo = " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
+  // The shortage lead has no SOC band of its own: its relay is the shortage terms.
+  let thresholdInfo = state.isShortageLead
+    ? ""
+    : " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
 
   // On .209 the relay is the shortage state itself, so say what it means.
   let relayPart = state.isShortageLead
     ? (state.relayIsOn ? "Heat pump enabled" : "SHORTAGE: heat pump locked")
     : (state.relayIsOn ? "Relay ON" : "Relay OFF");
+  // .209 says which term is short; a follower says what the lock is doing, and says
+  // nothing at all until it has heard, so an immersion running against a .209 that is not
+  // there reads exactly as it did before.
+  let shortagePart = "";
+  if (state.isShortageLead) {
+    // Three answers, and the unresolved one must not read as no shortage.
+    let shortage = inShortage();
+    if (shortage === null) {
+      shortagePart = ", " + unresolvedReason();
+    } else if (shortage) {
+      shortagePart = ", SHORTAGE: " + shortageReason();
+    }
+  } else if (state.lockKnown) {
+    shortagePart = state.lockIsClosed ? ", HP unlocked" : ", SHORTAGE: heat pump locked";
+  }
   let totalGen = state.acGeneration + state.dcGeneration;
   let genPart = ", Gen " + totalGen.toFixed(0) + "W";
   let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
@@ -223,7 +370,7 @@ function updateStatus(event) {
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = socPart + thresholdInfo + ", " + relayPart + genPart + inverterPart + vebusPart + inputPart + leadPart + eventPart;
+  let statusMessage = socPart + thresholdInfo + ", " + relayPart + genPart + inverterPart + vebusPart + inputPart + leadPart + shortagePart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -291,8 +438,14 @@ function finishSetup() {
   console.log("Device: " + state.deviceName +
              (state.isShortageLead ? " (determines shortage)" : " (dump load)") +
              (state.isLeadRelay ? ", lead relay" : ""));
-  console.log("High SOC Threshold: " + state.highSocThreshold + "%");
-  console.log("Low SOC Threshold: " + state.lowSocThreshold + "%");
+  if (state.isShortageLead) {
+    console.log("Shortage band: " + config.shortage.lowSoc + "% to " +
+               config.shortage.highSoc + "%, settled by " +
+               config.shortage.minGeneration + "W of generation when unresolved");
+  } else {
+    console.log("High SOC Threshold: " + state.highSocThreshold + "%");
+    console.log("Low SOC Threshold: " + state.lowSocThreshold + "%");
+  }
   console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
   console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W" +
              (contributesToInverterOverload() ? "" : " (no overload role)"));
@@ -302,20 +455,23 @@ function finishSetup() {
   if (state.leadRelayTopic) {
     console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
   }
+  if (state.lockTopic) {
+    console.log("Heat Pump Lock Monitoring: " + state.lockTopic);
+  }
   console.log("==========================================");
 
   updateStatus("Monitoring started");
 }
 
-// The manual time switch is wired to the lead relay's input and reaches the other
-// immersions over MQTT. The shortage lead subscribes to none of it.
-function assignLeadRelayTopic() {
-  if (state.isShortageLead || state.isLeadRelay) {
-    state.leadRelayTopic = "";
-    return;
-  }
+// What each role follows is what it does not own. The manual time switch is wired to the
+// lead relay's input and reaches the other immersions over MQTT; the heat pump lock is
+// .209's relay, which every dump load reads and .209 itself decides.
+function assignFollowedTopics() {
+  state.leadRelayTopic = (state.isShortageLead || state.isLeadRelay)
+    ? ""
+    : config.leadRelay.inputTopic;
 
-  state.leadRelayTopic = config.leadRelay.inputTopic;
+  state.lockTopic = state.isShortageLead ? "" : config.heatPumpLock.statusTopic;
 }
 
 // Resolve which device this is. Thresholds, gates and topics all depend on the answer, so
@@ -344,7 +500,8 @@ function determineDeviceIdentity(callback) {
         return;
       }
 
-      assignLeadRelayTopic();
+      assignFollowedTopics();
+      seedLatchFromRelay();
       state.identityKnown = true;
 
       if (state.isShortageLead) {
@@ -455,6 +612,24 @@ function processMqttMessage(topic, message) {
       return;
     }
 
+    // Handle the heat pump lock (never our own: .209 decides it and follows nobody)
+    if (state.lockTopic && topic === state.lockTopic) {
+      let payload = JSON.parse(message);
+      if (payload.output !== undefined) {
+        let wasClosed = state.lockIsClosed;
+        state.lockIsClosed = Boolean(payload.output);
+        state.lockKnown = true;
+
+        if (wasClosed !== state.lockIsClosed) {
+          console.log("Heat pump lock " + (state.lockIsClosed ? "closed - no shortage" : "open - SHORTAGE"));
+        }
+
+        updateStatus("Heat pump lock changed");
+        checkSystemState();
+      }
+      return;
+    }
+
     // Handle Victron Cerbo GX messages
     let topicPrefix = "N/" + config.cerbo.portalId + "/";
     if (topic.indexOf(topicPrefix) !== 0)
@@ -506,6 +681,10 @@ function processMqttMessage(topic, message) {
         turnRelayOff("Inverter overload protection");
       }
     }
+
+    // The latch is derived from these readings, so it settles as they arrive rather than
+    // waiting out a poll. Acting on it still happens on the poll.
+    updateShortageLatch();
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
   }
@@ -529,11 +708,17 @@ function handleMqttConnected() {
     logDebug("Subscribed to lead relay: " + state.leadRelayTopic);
   }
 
+  // Subscribe to the heat pump lock (everyone except .209, which decides it)
+  if (state.lockTopic) {
+    MQTT.subscribe(state.lockTopic, processMqttMessage);
+    logDebug("Subscribed to the heat pump lock: " + state.lockTopic);
+  }
+
   // Ask for a full republish, but not in the same breath as the subscriptions above: sent
   // together, the burst that answers it arrives before they are live and is missed.
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
-    requestLeadInput();
+    requestFollowedStatus(true);
   });
 
   // Setup periodic keepalive (every 30 seconds).
@@ -547,25 +732,34 @@ function handleMqttConnected() {
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
     sendKeepalive(state.vebusReceived);
-    requestLeadInput();
+    requestFollowedStatus(false);
   });
 }
 
 // Shelly publishes status on change and does not retain it, so a follower that has just
-// started believes the time switch is off until the lead relay next moves - which, for a
-// time clock, can be hours. `status_update` on the lead's command topic makes it republish
-// every component on the topics this controller already subscribes to, so asking costs no
-// extra subscription and no HTTP.
+// started believes the time switch is off and the heat pump running until each device next
+// moves - which, for a time clock, can be hours, and for the lock can be days.
+// `status_update` on a device's command topic makes it republish every component on the
+// topics this controller already subscribes to, so asking costs no extra subscription and
+// no HTTP.
 //
 // Same shape as the keepalive above, for the same reason: ask on connect, and keep asking
 // until the answer arrives, since the request itself can be the thing that goes missing.
-function requestLeadInput() {
-  if (state.isLeadRelay || !state.leadRelayTopic || state.leadInputReceived) {
-    return;
+// Forced on connect, because a value already held may have changed while the broker was
+// away and neither device will repeat it.
+function requestFollowedStatus(force) {
+  if (state.leadRelayTopic && (force || !state.leadInputReceived)) {
+    askToRepublish(config.leadRelay.commandTopic, "the lead relay");
   }
 
-  MQTT.publish(config.leadRelay.commandTopic, "status_update", 1, false);
-  logDebug("Asked the lead relay to republish: " + config.leadRelay.commandTopic);
+  if (state.lockTopic && (force || !state.lockKnown)) {
+    askToRepublish(config.heatPumpLock.commandTopic, "the heat pump lock");
+  }
+}
+
+function askToRepublish(commandTopic, label) {
+  MQTT.publish(commandTopic, "status_update", 1, false);
+  logDebug("Asked " + label + " to republish: " + commandTopic);
 }
 
 function sendKeepalive(suppressRepublish) {
@@ -796,6 +990,7 @@ function canSafelyEnable() {
 }
 
 function checkSystemState() {
+  updateShortageLatch();
   updateStatus("Monitoring");
 
   // Commanding a relay before the role is known would run .209 as an immersion. Doing
@@ -814,7 +1009,44 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 1: Local input (for the lead relay, this is the manual time switch)
+  // PRIORITY 1: Shortage.
+  //
+  // On .209 this is the whole job: its relay is the shortage state, expressed. Nothing else
+  // works the terms out for itself - they read the relay - so the heating side depends on
+  // one boolean, "is the heat pump running", and on nothing from the power system. It also
+  // means the lock can be driven by hand: stop this script, set the relay, and the biomass
+  // and DHW relays follow.
+  if (state.isShortageLead) {
+    let shortage = inShortage();
+
+    if (shortage === null) {
+      logDebug("Shortage unresolved (" + unresolvedReason() + ") - no action");
+      return;
+    }
+
+    if (shortage && state.relayIsOn) {
+      turnRelayOff("SHORTAGE: " + shortageReason());
+    } else if (!shortage && !state.relayIsOn) {
+      turnRelayOn("Shortage over");
+    }
+    return;
+  }
+
+  // A dump load reads the lock instead. Shedding covers the time switch as well as the SOC
+  // band: 2.7 kW of hot water is not something to make on a flat battery, and it saves a
+  // separate shed for the lead relay, whose hardware follow has already closed it.
+  //
+  // A lock never heard from masks nothing. The gates below belong to this relay and hold
+  // whether or not .209 is alive, so an undeployed or unreachable lock costs the floor and
+  // nothing else.
+  if (state.lockKnown && !state.lockIsClosed) {
+    if (state.relayIsOn) {
+      turnRelayOff("SHORTAGE: heat pump locked");
+    }
+    return;
+  }
+
+  // PRIORITY 2: Local input (for the lead relay, this is the manual time switch)
   // For non-lead relays, local input can still manually override
   if (config.followTimeSwitch && state.inputIsActive) {
     if (!state.relayIsOn && canSafelyEnable()) {
@@ -823,7 +1055,7 @@ function checkSystemState() {
     return; // Skip other checks when local input is active
   }
 
-  // PRIORITY 2: Lead relay input (manual time switch) - only for non-lead relays
+  // PRIORITY 3: Lead relay input (manual time switch) - only for non-lead relays
   if (config.followTimeSwitch && !state.isLeadRelay && state.leadInputActive) {
     if (!state.relayIsOn && canSafelyEnable()) {
       turnRelayOn("Lead relay input active (manual time switch ON)");
@@ -831,9 +1063,12 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 3: VE.Bus state check
+  // PRIORITY 4: VE.Bus state check
   // Only allow dump loads when VE.Bus is Inverting (state 9)
   // This covers: inverter off, inverter faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/PowerAssist)
+  //
+  // The lock covers this too, but this relay keeps its own gate: it is one subscription it
+  // already holds, and it is what makes a dump load safe with no .209 answering.
   if (state.vebusState !== 9) {
     // An absent reading is not a stale one: a script that has just started has none yet.
     // Past the grace, silence is the trouble this gate exists for.
@@ -850,7 +1085,7 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 4: SOC-based control
+  // PRIORITY 5: SOC-based control
   if (state.currentSoc <= 0) {
     logDebug("No SOC data available - no action taken");
     return;

@@ -4,7 +4,8 @@ The off-grid power system at Muttonhall / Blackhouse Lodge and the heating plant
 buffer with. This glossary fixes the words used across the controller scripts and the four
 documents — [README.md](README.md), [POWER.md](POWER.md), [HEATING.md](HEATING.md) and
 [CONTROLS.md](CONTROLS.md) — where several concepts have more than one plausible name and two
-different device classes were previously called the same thing.
+different device classes were previously called the same thing. Decisions that shaped these
+terms are recorded in [docs/adr](docs/adr).
 
 ## Language
 
@@ -16,10 +17,12 @@ battery is full. Measured as available headroom, not as an export figure.
 _Avoid_: Export, spill, excess
 
 **Shortage**:
-The system state entered when battery SOC falls below the shortage threshold, or the
-inverter is in any state other than inverting nominally off-grid, and left only when SOC
-has recovered above the exit threshold and the inverter is back to normal. It is a latched
-state with wide hysteresis, not an instantaneous reading.
+The system state in which consumption should come down: the inverter is in any state other
+than inverting nominally off-grid, or the battery is low. Latched, and widely so — entered
+at a low state of charge and left only at a high one — because the loads it sheds are the
+loads that move the battery, and a state without memory would oscillate at its own
+threshold. A property of the power system, held by one device and expressed as the heat pump
+lock; everything else observes the lock rather than the terms behind it.
 _Avoid_: Low battery, deficit, emergency
 
 **Sustained shortage**:
@@ -99,10 +102,21 @@ _Avoid_: Opportunistic enable, DHW schedule, synthetic timer
 
 **Lead relay**:
 The one device in a coordinated group that owns a decision and expresses it, which the
-others observe rather than recompute. The manual time switch group and the shortage state
-each have one.
+others observe rather than recompute. There are two: the DHW immersion carrying the manual
+time switch on its input, and Heat Pump Enable, whose relay is the shortage state.
 _Avoid_: Master, primary, coordinator
 
 **Generation gate**:
 The precondition that measurable generation exists before any dump load is enabled,
-independent of SOC. Prevents dumping from a charged battery when no generation will replace it.
+independent of SOC. Prevents dumping from a charged battery when no generation will replace
+it. The same reading against the same threshold also settles an unresolved shortage latch,
+but that is a term of shortage rather than this gate: the gate can be disabled for a relay
+that is not a dump load, and the term never is.
+_Avoid_: Generation threshold, PV gate
+
+**Floor**:
+The behaviour a controller falls back to when the device it follows says nothing — not a
+failure mode but the designed minimum, arrived at by the follower keeping every gate that is
+its own. An unreachable Heat Pump Enable costs the immersions the shortage shed and nothing
+else, which is the immersion floor.
+_Avoid_: Fallback, default, degraded mode

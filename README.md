@@ -97,28 +97,43 @@ Two roles, resolved from the device ID at startup:
 
 | Role | Devices | Job |
 |---|---|---|
-| Dump load | .88 .90 .91 .100 | DHW immersions on a narrow SOC band, coordinated by a lead relay carrying the manual time switch |
-| Shortage lead | .209 | Owns the shortage decision, expressed as its own relay — the Grant's heat pump lock. See [CONTROLS.md](CONTROLS.md) |
+| Dump load | .88 .90 .91 .100 | DHW immersions on a narrow SOC band, coordinated by a lead relay carrying the manual time switch, and shed while the heat pump lock is open |
+| Shortage lead | .209 | No band of its own: its relay *is* shortage, expressed — the Grant's heat pump lock, which every follower reads. See [CONTROLS.md](CONTROLS.md) |
 
 **Features:**
 - Lead relay coordination via MQTT
 - Manual time switch support (connected to lead relay input)
 - Per-device SOC thresholds from `config.relays`, the one table this file's five deployments share
-- Hysteresis derived as low = high - 1%, or stated outright where the band is wide (90/30)
+- Hysteresis derived as low = high - 1%
+- Shortage decided by .209 and expressed on its relay; the immersions follow it — see [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md)
 - No dwell timers in either direction
 - AC input suppression
 
-**Priority Logic:** (0, 1, 2 and the checks in 4 are dump load concerns, which the shortage
-lead drops; 3 and the thresholds in 4 apply in both roles)
+**Priority Logic:** (everything but 1 is a dump load concern, which the shortage lead drops;
+1 is the whole of what .209 does)
 0. **Inverter overload** - Emergency suppression if inverter output exceeds limit (overrides all)
-1. **Local input** - Manual override (with inverter headroom check before enabling)
-2. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
-3. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed. An unknown or stale state counts as not inverting; a state not yet received within `config.startupGrace` (3 minutes) of starting counts as nothing, since the first poll happens before MQTT has connected and the Cerbo boots slower than the Shelly
-4. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
+1. **Shortage** - On .209, its relay is the shortage state: closed when there is none, open when there is, and nothing yet heard from the Cerbo means no action either way for `config.startupGrace` (3 minutes). On a dump load, an open lock sheds the relay and returns — which covers the time switch as well as the SOC band, and saves a separate shed for the lead relay whose hardware follow has already closed it. A lock never heard from sheds nothing
+2. **Local input** - Manual override (with inverter headroom check before enabling)
+3. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
+4. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed. An unknown or stale state counts as not inverting; a state not yet received within `config.startupGrace` counts as nothing. The lock covers this too, but the gate is one subscription the relay already holds and it is what keeps a dump load safe with no .209 answering
+5. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
+
+**Shortage**, on .209 only: `VE.Bus ≠ Inverting`, or the latch — on at `SOC ≤ 30%`, off at
+`SOC ≥ 90%`, held between the two, and settled by more than `config.shortage.minGeneration`
+of generation where it has never been resolved. An unknown or stale VE.Bus state counts as
+not inverting; the VE.Bus term overlays the latch rather than gating it, so the SOC terms
+settle without waiting for a VE.Bus reading. All of it is `config.shortage`. Why the band is
+60 points wide, and why an unresolved latch assumes shortage, are in
+[CONTROLS.md](CONTROLS.md).
+
+**A dump load does not compute any of this.** It follows .209's switch status, which is one
+boolean and one subscription, and sheds while the lock is open. See
+[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
 
 **Generation Gate:**
 - Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
 - Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
+- Shortage uses the same reading against the same threshold, but under `config.shortage.minGeneration`, which is never disabled; this gate is, for a relay that is not a dump load
 - Naturally self-staggers multiple dump loads: each load coming on reduces battery charging rate, and only enables when its SOC threshold is met with sufficient generation
 - Turn-off is purely SOC-based and immediate — a hydro trip sheds the load at once
 - Configurable via `config.minGenerationPower`
@@ -131,7 +146,8 @@ lead drops; 3 and the thresholds in 4 apply in both roles)
 
 **Shortage Lead Role (.209, Heat Pump Enable):**
 - Its row in `config.relays` carries `shortageLead: true`; everything else follows from that flag
-- Thresholds 90% to leave shortage, 30% to enter — a 60-point band, stated outright rather than derived
+- No SOC band of its own — its relay is closed exactly when there is no shortage, and that relay is what every follower reads
+- Reads its latch back off its own relay contact on a script restart, trusting it only where the switch's last-command `source` shows something commanded it
 - Every dump load gate dropped: no generation gate, no headroom check, no overload fast-path. The heat pump is a load, not a dump, and overload reaches it through the VE.Bus term once the generator starts
 - `followTimeSwitch: false` — nothing is wired to its input, and hot water is no reason to run the heat pump on a flat battery
 - Status text reads `SHORTAGE: heat pump locked`, since this relay is the shortage state expressed physically
@@ -142,7 +158,7 @@ lead drops; 3 and the thresholds in 4 apply in both roles)
 - Thresholds are not knobs. The immersion stagger and the shortage band are properties of the system, so they live in the table and nowhere else — not in a slider that can drift from what the documents say, and not on five devices that can drift from each other
 - An unreadable device ID is retried every `config.identityRetryDelay`. A device the table does not list runs nothing at all, which is what makes a misdirected deploy safe
 - Lead relay uses local input; others monitor via MQTT
-- Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch status and nothing else, so a device that does not publish is a controller whose decision never leaves it
+- Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch or input status and nothing else, so a device with notifications off is a decision that never leaves it
 
 **Virtual Components:**
 - `text:204` - Status display
@@ -331,10 +347,15 @@ the Victron keepalive — subscribe first, then induce a redundant broadcast —
 extra subscription, no HTTP and no reply topic. It needs only `enable_control`, which is on
 by default.
 
-Asked on connect, after the subscriptions land, and again on every 30-second poll until an
-input status has actually arrived, since the request is as losable as the answer. A broker
-drop clears the flag: a change made while the follower was away is not repeated, so the
-reading is unknown afterwards rather than merely old.
+Asked on connect, after the subscriptions land, and again on every 30-second poll until the
+status has actually arrived, since the request is as losable as the answer. The ask on
+connect is unconditional: a value already held may have changed while the broker was away,
+and neither device will repeat it.
+
+What a drop does to the flag differs by what the value is for. The lead relay's input flag is
+cleared, so the reading is unknown afterwards rather than merely old. The heat pump lock's is
+kept, because an absent lock sheds nothing: forgetting it would shed four immersions on a
+broker blip, and silence is not .209 saying the battery recovered.
 
 ---
 
@@ -399,7 +420,7 @@ Device addresses are in [POWER.md](POWER.md).
 
 Example output:
 ```
-{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, VE Inverting, Lead OFF: Monitoring","source":"sys","last_update_ts":1771542699}
+{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, VE Inverting, Input OFF, Lead OFF, HP unlocked: Monitoring","source":"sys","last_update_ts":1771542699}
 ```
 
 ---
