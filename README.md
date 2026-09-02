@@ -156,7 +156,7 @@ boolean and one subscription, and sheds while the lock is open. See
 **Configuration:**
 - `config.relays` is the whole configuration: one row per device, matched on the ID the device reports at startup, carrying its name, its `high` threshold (and `low` where the band is too wide to derive), and the `leadRelay` / `shortageLead` flags that are the only things that vary by role
 - Thresholds are not knobs. The immersion stagger and the shortage band are properties of the system, so they live in the table and nowhere else — not in a slider that can drift from what the documents say, and not on five devices that can drift from each other
-- An unreadable device ID is retried every `config.identityRetryDelay`. A device the table does not list runs nothing at all, which is what makes a misdirected deploy safe
+- The device ID is read synchronously with `Shelly.getDeviceInfo()`, so the role is settled before anything else runs and there is nothing to retry. A device the table does not list runs nothing at all, which is what makes a misdirected deploy safe
 - Lead relay uses local input; others monitor via MQTT
 - Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch or input status and nothing else, so a device with notifications off is a decision that never leaves it
 

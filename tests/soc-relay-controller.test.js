@@ -25,14 +25,12 @@ const PASSTHRU = 8;
 
 const MINUTES = 60 * 1000;
 
-// One relay from the table, settled as the GetDeviceInfo callback would settle it - the
-// harness never runs that callback, since Shelly.call does not call back.
+// The script as deployed on one relay from the table. Reading the device ID is
+// synchronous, so a load gets as far as the role, its topics and its latch on its own.
 function loadRelay(deviceId) {
-  const loaded = load(DUMP);
-  assert.strictEqual(loaded.mod.applySettingsForDevice(deviceId), true,
-    deviceId + " is not in the relay table");
-  loaded.mod.assignFollowedTopics();
-  loaded.mod.state.identityKnown = true;
+  const loaded = load(DUMP, deviceId);
+  assert.strictEqual(loaded.mod.state.identityKnown, true,
+    deviceId + " resolved no role from the relay table");
   return loaded;
 }
 
@@ -96,11 +94,25 @@ function bannerText(mod) {
 // ===== Role resolution =====
 
 test("identity is resolved before anything else runs", () => {
-  // Thresholds, gates and topics all depend on which relay this is, so nothing can
-  // happen before the device has matched itself against the table.
-  const { calls } = loadImmersion();
-  assert.strictEqual(calls[0].method, "Shelly.GetDeviceInfo",
+  // Thresholds, gates and topics all depend on which relay this is, and the role decides
+  // the threshold the persisted component is created with, so nothing can happen before
+  // the device has matched itself against the table.
+  const { mod, calls } = loadImmersion();
+
+  assert.strictEqual(mod.state.deviceName, "DHW Left Top",
+    "the role is not resolved by the time the script is running");
+  assert.strictEqual(calls[0].method, "Shelly.GetComponents",
     "startup does something before it knows which device it is on");
+});
+
+test("a device the table does not list resolves no role and runs nothing", () => {
+  // The whole of what makes a misdirected deploy safe: no threshold, no topics, no
+  // command. Nothing is retried, because there is nothing to wait for.
+  const { mod, calls, timers } = load(DUMP, "shelly1pmg3-000000000000");
+
+  assert.strictEqual(mod.state.identityKnown, false);
+  assert.deepStrictEqual(calls, [], "a device with no role created components");
+  assert.deepStrictEqual(timers, [], "a device with no role scheduled work");
 });
 
 test("a DHW immersion is not the shortage lead", () => {
@@ -936,30 +948,6 @@ test("no relay is commanded before the role is known", () => {
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [],
     "guessing the role would run .209 as an immersion: locked below 95%, shed on overload");
-});
-
-test("an unreadable device ID is retried rather than guessed", () => {
-  const { mod, timers, calls } = load(DUMP);
-  let attempts = 0;
-
-  global.Shelly.call = function (method, params, callback) {
-    calls.push({ method: method, params: params });
-    if (method === "Shelly.GetDeviceInfo") {
-      attempts++;
-      callback(null, -1, "timed out");
-    }
-  };
-
-  mod.determineDeviceIdentity(function () {});
-
-  assert.strictEqual(attempts, 1);
-  assert.strictEqual(mod.state.identityKnown, false);
-  const retry = timers.filter((t) => t.repeat === false).pop();
-  assert.ok(retry, "no retry was scheduled");
-  assert.strictEqual(retry.ms, mod.config.identityRetryDelay);
-
-  retry.fn();
-  assert.strictEqual(attempts, 2, "the retry did not ask again");
 });
 
 // ===== Losing the broker =====

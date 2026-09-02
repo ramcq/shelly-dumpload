@@ -7,7 +7,9 @@
 // is enough to reach them; nothing in the controllers is modified for testing.
 //
 // Shelly.call never invokes its callback, so the script's own init() stalls
-// harmlessly after the first RPC and never starts timers or MQTT.
+// harmlessly after the first RPC and never starts timers or MQTT. It gets as far
+// as resolving its identity, which is synchronous, so a load() given a device ID
+// starts where a real deployment on that device would.
 
 const fs = require("fs");
 const os = require("os");
@@ -63,11 +65,13 @@ function exportsLine() {
 
 let loadCounter = 0;
 
-// Load `scriptName` from the repo root. Returns the script's internals plus the
-// MQTT traffic, the RPC calls, the timers it set and the MQTT handlers it installed, so
-// tests can assert on what it published, subscribed to, commanded and scheduled. Each
-// call is a fresh copy with fresh state.
-function load(scriptName) {
+// Load `scriptName` from the repo root, as if deployed on `deviceId`. Returns the
+// script's internals plus the MQTT traffic, the RPC calls, the timers it set and the
+// MQTT handlers it installed, so tests can assert on what it published, subscribed
+// to, commanded and scheduled. Each call is a fresh copy with fresh state. The
+// default ID is in no controller's relay table, so a load that does not name a
+// device resolves no role.
+function load(scriptName, deviceId) {
   const published = [];
   const subscribed = [];
   const calls = [];
@@ -86,6 +90,9 @@ function load(scriptName) {
       addEventHandler: function () {},
       getComponentStatus: function () { return null; },
       getComponentConfig: function () { return null; },
+      getDeviceInfo: function () {
+        return { id: deviceId || "shelly1pmg3-000000000000" };
+      },
     },
     MQTT: {
       subscribe: function (topic) { subscribed.push(topic); },

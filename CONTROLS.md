@@ -447,10 +447,10 @@ where the two had already disagreed about .90 and .91. A persisted component lef
 either script is now ignored rather than read. Immersions still derive their low threshold
 as `high - 1`; only a band too wide to derive is stated outright.
 
-An identity that cannot be read is retried rather than guessed, and a device the table does
-not list runs nothing at all. Either way the controller commands nothing, which leaves every
-relay in the unscripted behaviour the configuration table above guarantees — where guessing
-would have run .209 as an immersion, locked below 95% and shed by the overload path.
+The identity is read before anything else runs, and a device the table does not list runs
+nothing at all: the controller commands nothing, which leaves the relay in the unscripted
+behaviour the configuration table above guarantees — where guessing would have run .209 as
+an immersion, locked below 95% and shed by the overload path.
 
 The script asserts `status_ntf` in the device's MQTT config. Every follower reads .209's
 published switch status, and the immersions read the lead relay's input, so a device with

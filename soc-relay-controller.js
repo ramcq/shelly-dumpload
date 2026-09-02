@@ -76,7 +76,6 @@ let config = {
   // Timing settings. There are no dwell timers: SOC control does not chatter, and the
   // measured cycling rate is decades inside the relay's rating. See CONTROLS.md.
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
-  identityRetryDelay: 5 * 1000, // ms - between attempts to read the device ID
   startupGrace: 3 * 60 * 1000,  // ms - how long the VE.Bus gate waits for its first reading
                                 // before treating silence as trouble. Covers a Cerbo boot
   checkInterval: 30 * 1000,     // 30 seconds in milliseconds
@@ -475,46 +474,35 @@ function assignFollowedTopics() {
 }
 
 // Resolve which device this is. Thresholds, gates and topics all depend on the answer, so
-// nothing runs before it and an unreadable identity is retried rather than guessed.
-function determineDeviceIdentity(callback) {
-  Shelly.call(
-    "Shelly.GetDeviceInfo",
-    {},
-    function(result, error_code, error_message) {
-      if (error_code !== 0 || !result || !result.id) {
-        // Until this succeeds the controller commands nothing, so every relay keeps its
-        // unscripted behaviour.
-        console.log("Error getting device info, retrying: " + error_message);
-        Timer.set(config.identityRetryDelay, false, function() {
-          determineDeviceIdentity(callback);
-        });
-        return;
-      }
+// nothing runs before it - and nothing waits for it either: the device ID is local data and
+// Shelly.getDeviceInfo() hands it straight back. Returns whether the table knows this
+// device; a table that does not runs nothing at all, which is what makes a misdirected
+// deploy safe.
+function determineDeviceIdentity() {
+  let info = Shelly.getDeviceInfo();
 
-      logDebug("Device ID: " + result.id);
+  logDebug("Device ID: " + info.id);
 
-      if (!applySettingsForDevice(result.id)) {
-        // Not a deployment mistake this script can recover from by waiting, so say so
-        // once and leave every relay in the unscripted behaviour its configuration gives.
-        console.log("Device " + result.id + " is not in the relay table - doing nothing");
-        return;
-      }
+  if (!applySettingsForDevice(info.id)) {
+    // Not a deployment mistake this script can recover from by waiting, so say so once and
+    // leave every relay in the unscripted behaviour its configuration gives.
+    console.log("Device " + info.id + " is not in the relay table - doing nothing");
+    return false;
+  }
 
-      assignFollowedTopics();
-      seedLatchFromRelay();
-      state.identityKnown = true;
+  assignFollowedTopics();
+  seedLatchFromRelay();
+  state.identityKnown = true;
 
-      if (state.isShortageLead) {
-        console.log("This device determines shortage - " + state.deviceName);
-      } else if (state.isLeadRelay) {
-        console.log("This device IS the lead relay - will use local input");
-      } else {
-        console.log("This device is NOT the lead relay - will monitor: " + state.leadRelayTopic);
-      }
+  if (state.isShortageLead) {
+    console.log("This device determines shortage - " + state.deviceName);
+  } else if (state.isLeadRelay) {
+    console.log("This device IS the lead relay - will use local input");
+  } else {
+    console.log("This device is NOT the lead relay - will monitor: " + state.leadRelayTopic);
+  }
 
-      if (callback) callback();
-    }
-  );
+  return true;
 }
 
 // ===== Event handlers =====
@@ -1181,9 +1169,11 @@ function init() {
 
   // Identity first: the role decides the threshold the persisted virtual component is
   // created with, so it cannot be resolved after that component already exists.
-  determineDeviceIdentity(function() {
-    initializeVirtualComponents();
-  });
+  if (!determineDeviceIdentity()) {
+    return;
+  }
+
+  initializeVirtualComponents();
 }
 
 // Run initialization
