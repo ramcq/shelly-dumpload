@@ -250,7 +250,7 @@ Live behaviour, for context. Per-script detail is in [README.md](README.md).
 
 **DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
 threshold — 96/95 on .88, 94/93 on .90, 95/94 on .91, 96/95 on .100 — so they stagger
-rather than all switching at once.
+rather than all switching at once as SOC crosses the band.
 Each checks that generation exceeds 500 W before enabling, so a dump is never *started* out
 of the battery when renewables are short, and checks inverter headroom before adding its
 2.7 kW. Turn-off is purely SOC and waits out no dwell: once the low threshold is crossed,
@@ -278,7 +278,42 @@ inverter capacity until loads cycle off on SOC hysteresis. The heat pump does no
 risk directly, since it is not gated on surplus, but it is 3–5 kW of the house load the
 calculation starts from — prioritising the heat pump over any dumps/immersions is correct.
 
----
+**Shedding happens on the edge; releasing waits for a poll.** The immersion stagger is a
+property of SOC *crossing* four thresholds a point apart. Where all four are already
+satisfied — anywhere above 96% — it does nothing, so the lock closing would release every
+immersion in the same instant, each deciding against an inverter reading that predates its
+peers' load: four relays, up to 10.8 kW, and every headroom check blind to what the others
+just did. The lock introduced that case, because before it the only way in was a threshold
+crossing, which is inherently ordered.
+
+The two directions are not equally urgent, so they are not treated equally. A lock opening
+sheds on the edge — that is the safety direction and waits for nothing. A lock closing is
+recorded and left to the relay's own poll, and the polls are spaced across the interval:
+
+| Tank | Offset |
+|---|---|
+| Left (.88, .90) | 0 s |
+| Right (.91) | 10 s |
+| Annex (.100) | 20 s |
+| Heat Pump Enable (.209) | 0 s — no dump load to space out, and the others wait on it |
+
+Grouped by tank rather than by device, because that is what the loads are: the two left
+elements share a slot, the top one sitting in the stratified layer where it almost never
+calls, so the pair is one 2.7 kW load in practice. What has to be separated is left from
+right from annex.
+
+**Nothing is queued to make this work,** which is the point. The poll re-reads the whole
+ladder rather than acting on an intention formed earlier, so a lock that opens again before
+the poll comes round is simply a shed, with no pending enable to cancel and no way to close
+a relay on stale intent. The gap is not a dwell — it holds no decision, it only sets when
+the decision is taken — and what it buys is that each relay's headroom check sees the
+previous relay's load. Worst case a release waits one full interval.
+
+**A script start is deliberately not staggered.** A restart can find this relay closed with
+the lock open, and that shed must not wait on an offset whose only job is to space out
+enabling, so the first check runs at once and only the loop that follows it starts late. The
+consequence is that starting four scripts together can still enable four relays together:
+deploy them one at a time, or watch the inverter while you do.
 
 ## DHW
 
