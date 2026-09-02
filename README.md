@@ -103,7 +103,7 @@ Two roles, resolved from the device ID at startup:
 **Features:**
 - Lead relay coordination via MQTT
 - Manual time switch support (connected to lead relay input)
-- User-configurable SOC thresholds
+- Per-device SOC thresholds from `config.relays`, the one table this file's five deployments share
 - Hysteresis derived as low = high - 1%, or stated outright where the band is wide (90/30)
 - No dwell timers in either direction
 - AC input suppression
@@ -130,24 +130,25 @@ lead drops; 3 and the thresholds in 4 apply in both roles)
 - Configurable via `config.inverter.emergencyLimit` and `config.inverter.heaterPower`
 
 **Shortage Lead Role (.209, Heat Pump Enable):**
-- `config.shortageLead.deviceId` selects the device; everything else keeps the dump load defaults
+- Its row in `config.relays` carries `shortageLead: true`; everything else follows from that flag
 - Thresholds 90% to leave shortage, 30% to enter — a 60-point band, stated outright rather than derived
 - Every dump load gate dropped: no generation gate, no headroom check, no overload fast-path. The heat pump is a load, not a dump, and overload reaches it through the VE.Bus term once the generator starts
 - `followTimeSwitch: false` — nothing is wired to its input, and hot water is no reason to run the heat pump on a flat battery
-- No threshold slider: `number:202` is shared with `smart-load-controller.js` and stops at 50, so both numbers stay in the file
 - Status text reads `SHORTAGE: heat pump locked`, since this relay is the shortage state expressed physically
 - Requires the relay to be `detached` with `initial_state: "on"` — see the relay configuration table in [CONTROLS.md](CONTROLS.md)
 
 **Configuration:**
-- Set `config.leadRelay.deviceId` to MAC address of lead relay
-- Script auto-detects its role from the device ID: shortage lead, time-switch lead relay, or follower. An unreadable device ID is retried every `config.identityRetryDelay`, and no relay is commanded until the role is known
+- `config.relays` is the whole configuration: one row per device, matched on the ID the device reports at startup, carrying its name, its `high` threshold (and `low` where the band is too wide to derive), and the `leadRelay` / `shortageLead` flags that are the only things that vary by role
+- Thresholds are not knobs. The immersion stagger and the shortage band are properties of the system, so they live in the table and nowhere else — not in a slider that can drift from what the documents say, and not on five devices that can drift from each other
+- An unreadable device ID is retried every `config.identityRetryDelay`. A device the table does not list runs nothing at all, which is what makes a misdirected deploy safe
 - Lead relay uses local input; others monitor via MQTT
 - Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch status and nothing else, so a device that does not publish is a controller whose decision never leaves it
 
 **Virtual Components:**
-- `number:202` - High SOC Threshold (%) — matches smart-load-controller for drop-in replacement
 - `text:204` - Status display
-- `group:205` - Group, named for the role at creation (`Dump Load Controller`, `Heat Pump Enable`); an existing group is not renamed, and holds only the status text on the shortage source
+
+A `number:202` left behind by `smart-load-controller.js` or by an earlier version of this
+script is ignored, not read: the table is the only source of a threshold.
 
 ---
 

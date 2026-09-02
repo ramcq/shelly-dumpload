@@ -33,7 +33,7 @@ const EXPORTED = [
   "isDumpLoadStalled",
   "getDumpLoadState",
   // soc-relay-controller
-  "applyRoleForDevice",
+  "applySettingsForDevice",
   "setupVirtualComponents",
   "handleMqttConnected",
   "connectMqtt",
