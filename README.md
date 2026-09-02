@@ -134,7 +134,7 @@ boolean and one subscription, and sheds while the lock is open. See
 - Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
 - Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
 - Shortage uses the same reading against the same threshold, but under `config.shortage.minGeneration`, which is never disabled; this gate is, for a relay that is not a dump load
-- Naturally self-staggers multiple dump loads: each load coming on reduces battery charging rate, and only enables when its SOC threshold is met with sufficient generation
+- Naturally self-staggers multiple dump loads *as SOC crosses their thresholds*: each load coming on reduces battery charging rate, and only enables when its own SOC threshold is met with sufficient generation. It does not stagger a release that finds every threshold already satisfied — see [CONTROLS.md](CONTROLS.md) on simultaneous release
 - Turn-off is purely SOC-based and immediate — a hydro trip sheds the load at once
 - Configurable via `config.minGenerationPower`
 

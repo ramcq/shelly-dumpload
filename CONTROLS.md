@@ -250,7 +250,7 @@ Live behaviour, for context. Per-script detail is in [README.md](README.md).
 
 **DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
 threshold — 96/95 on .88, 94/93 on .90, 95/94 on .91, 96/95 on .100 — so they stagger
-rather than all switching at once.
+rather than all switching at once as SOC crosses the band.
 Each checks that generation exceeds 500 W before enabling, so a dump is never *started* out
 of the battery when renewables are short, and checks inverter headroom before adding its
 2.7 kW. Turn-off is purely SOC and waits out no dwell: once the low threshold is crossed,
@@ -278,7 +278,21 @@ inverter capacity until loads cycle off on SOC hysteresis. The heat pump does no
 risk directly, since it is not gated on surplus, but it is 3–5 kW of the house load the
 calculation starts from — prioritising the heat pump over any dumps/immersions is correct.
 
----
+**Simultaneous release, also open.** The immersion stagger is a property of SOC *crossing*
+four thresholds a point apart. Where all four are already satisfied — anywhere above 96% —
+it does nothing, and anything that releases the four together releases them in the same
+instant: the heat pump lock closing, or the republish that follows a broker reconnect. Each
+device then decides on an inverter reading that predates its peers' load, so four relays can
+close against the same measurement and put up to 10.8 kW on the inverter at once, with the
+headroom check unable to see what the others just did. The lock is what introduced this:
+before it, the only way in was a threshold crossing, which is inherently ordered.
+
+Two things constrain the fix. Shedding must stay immediate, because it is the safety
+direction, so only the release wants spreading. And what the release needs is not a dwell —
+[README.md](README.md) sets out why there are none — but a gap long enough for the inverter
+reading to catch up with the previous relay, after which the headroom check each device
+already runs does the actual protecting. The relay table is already ordered, so the gap can
+come from a device's place in it rather than from a timer nobody can predict.
 
 ## DHW
 
