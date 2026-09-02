@@ -290,7 +290,16 @@ crossing, which is inherently ordered.
 
 The two directions are not equally urgent, so they are not treated equally. A lock opening
 sheds on the edge — that is the safety direction and waits for nothing. A lock closing is
-recorded and left to the relay's own poll, and the polls are spaced across the interval:
+recorded and left to the relay's own poll.
+
+The manual time switch is the same shape and the busier case: the lead relay's input status
+reaches the three followers in one instant, and the clock runs twice a day where the lock may
+open a handful of times a year. Closing the clock can only enable, so it waits for the poll
+too; opening it can shed, through the gates below the time switch in the ladder, so it keeps
+the edge. Every other way in already waits, because the Victron readings — SOC, generation,
+VE.Bus returning to Inverting — do not act when they arrive; they are acted on by the poll.
+
+The polls are spaced across the interval:
 
 | Tank | Offset |
 |---|---|
@@ -304,6 +313,20 @@ elements share a slot, the top one sitting in the stratified layer where it almo
 calls, so the pair is one 2.7 kW load in practice. What has to be separated is left from
 right from annex.
 
+**The slots are anchored to the clock, not to when a script started.** Start times do not
+agree on where a window begins: deploy two relays twenty seconds apart with offsets ten
+seconds apart and they land on the same tick, since it takes only start plus offset to come
+out the same modulo the interval. So a relay waits for the moment the clock comes round to
+its own slot and keeps it for as long as the script runs, whenever it happened to start. A
+device with no synchronised clock has nothing shared to anchor to and falls back to
+start-relative, which is worth something after a site-wide restart and nothing after a
+staggered one.
+
+The left tank holds offset 0 deliberately. Its lead relay answers the time switch in hardware
+and its script waits for nothing, so closing the clock still produces an audible click in the
+same room as the switch — which is the feedback someone standing there is entitled to. The
+tanks that wait are the ones nobody is listening to.
+
 **Nothing is queued to make this work,** which is the point. The poll re-reads the whole
 ladder rather than acting on an intention formed earlier, so a lock that opens again before
 the poll comes round is simply a shed, with no pending enable to cancel and no way to close
@@ -312,10 +335,11 @@ the decision is taken — and what it buys is that each relay's headroom check s
 previous relay's load. Worst case a release waits one full interval.
 
 **A script start is deliberately not staggered.** A restart can find this relay closed with
-the lock open, and that shed must not wait on an offset whose only job is to space out
-enabling, so the first check runs at once and only the loop that follows it starts late. The
-consequence is that starting four scripts together can still enable four relays together:
-deploy them one at a time, or watch the inverter while you do.
+the lock open, and that shed must not wait on a slot whose only job is to space out
+enabling, so the first check runs at once and only the loop that follows it waits. The
+consequence is that starting four scripts together can still enable four relays together —
+the slots govern every poll after the first, not the first. Deploy them one at a time, or
+watch the inverter while you do; deploy order no longer disturbs the slots themselves.
 
 ## DHW
 

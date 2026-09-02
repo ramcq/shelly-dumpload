@@ -612,8 +612,17 @@ function processMqttMessage(topic, message) {
         logDebug("Lead input updated via MQTT: " + state.leadInputActive);
         updateStatus("Lead input changed");
 
-        // Immediately check system state when lead input changes
-        checkSystemState();
+        // The other edge that reaches all four immersions at once, and the more frequent
+        // one: the clock runs twice a day where the lock may open a handful of times a
+        // year. A time switch turning on can only enable - priority 3 turns the relay on
+        // and returns - so it waits for this relay's poll, exactly as a release does. The
+        // lead relay is not on this path at all: its own input closes it in hardware and
+        // it sits at offset 0, so the left tank still comes on with an audible click when
+        // the clock closes, which is the feedback someone standing at the switch wants.
+        // Turning off can shed, through the gates below priority 3, so it keeps the edge.
+        if (!state.leadInputActive) {
+          checkSystemState();
+        }
       }
       return;
     }
@@ -1132,6 +1141,29 @@ function checkStatus() {
   checkSystemState();
 }
 
+// How long to wait before starting the loop, so that this relay's polls land in its own
+// slot. The offsets only separate anything if the relays agree on where the window starts,
+// and their script start times do not: deployed a few seconds apart, two relays can share a
+// tick however different their offsets are, since it takes only start plus offset to come
+// out the same modulo the interval. Wall clock is the one origin they do share, so a relay
+// polls when the clock comes round to its offset. Without a synchronised clock there is
+// nothing shared to anchor to, and the offset falls back to being start-relative - worth
+// what it was worth before, which is something for a site-wide restart and nothing for a
+// staggered one.
+function pollPhaseDelay() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || !sys.unixtime || !sys.last_sync_ts) {
+    logDebug("No synchronised clock - phasing the poll from this script's start");
+    return state.pollOffset;
+  }
+
+  let period = config.checkInterval / 1000;
+  let slot = state.pollOffset / 1000;
+
+  return ((slot - (sys.unixtime % period) + period) % period) * 1000;
+}
+
 function startMonitoring() {
   logDebug("Starting monitoring with interval: " + (config.checkInterval / 1000) + " seconds");
 
@@ -1146,11 +1178,13 @@ function startMonitoring() {
   // open, and a shed must not wait on an offset whose only job is to space out enabling.
   checkStatus();
 
-  // The loop itself starts late, which puts this relay's poll at its own point in the
-  // window for as long as the script runs. See config.relays.
-  if (state.pollOffset > 0) {
-    logDebug("Poll offset " + (state.pollOffset / 1000) + "s before the loop starts");
-    Timer.set(state.pollOffset, false, startPolling);
+  // The loop itself starts on this relay's slot, and keeps it for as long as the script
+  // runs. See config.relays.
+  let delay = pollPhaseDelay();
+
+  if (delay > 0) {
+    logDebug("Waiting " + (delay / 1000) + "s for this relay's slot before polling");
+    Timer.set(delay, false, startPolling);
     return;
   }
 

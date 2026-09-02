@@ -17,6 +17,7 @@ const DUMP = "soc-relay-controller.js";
 const HEAT_PUMP_ENABLE = "shelly1minig3-d885ac0a3668"; // .209, no band of its own
 const LEAD_RELAY = "shelly1pmg3-543204558fc8"; // .90, Left Bottom, 94/93, time switch
 const LEFT_TOP = "shelly1pmg3-543204558c6c"; // .88, 96/95, a plain follower
+const RIGHT = "shelly1pmg3-dcda0ce04fb0"; // .91, 95/94
 const ANNEX = "shelly1pmg3-dcda0ce06e98"; // .100, 96/95, the last tank in the poll window
 const HP_LOCK = "shelly1minig3-d885ac0a3668/status/switch:0";
 const PORTAL = "c0847dc9a794";
@@ -53,6 +54,11 @@ function victron(mod, key, value) {
 // What .209 publishes: its relay closed means the heat pump is running, open is shortage.
 function lock(mod, closed) {
   mod.processMqttMessage(HP_LOCK, JSON.stringify({ id: 0, output: closed }));
+}
+
+// What the lead relay publishes when the manual time switch moves.
+function leadInput(mod, active) {
+  mod.processMqttMessage(mod.config.leadRelay.inputTopic, JSON.stringify({ state: active }));
 }
 
 // Put the controller in a known place, so a test only states what it is varying.
@@ -758,6 +764,42 @@ test("the shortage lead asks nobody anything", () => {
 
 // ===== Spacing the release out =====
 
+test("the time switch turning on waits for this relay's poll", () => {
+  // The lead relay's input status reaches all three followers in the same instant, and
+  // twice a day, so it is the busier version of the lock's release.
+  const { mod, calls } = loadImmersion();
+  settle(mod, false);
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "batterySOC", 50);
+  lock(mod, true);
+
+  leadInput(mod, true);
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the clock closing must not close three relays against one inverter reading");
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true],
+    "the poll after the clock closed has to make hot water");
+});
+
+test("the time switch turning off still sheds on the edge", () => {
+  // Below its band, losing the clock is the only thing keeping this relay on, so the edge
+  // is a shed - and shedding never waits.
+  const { mod, calls } = loadImmersion();
+  settle(mod, true);
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "batterySOC", 50);
+  lock(mod, true);
+  leadInput(mod, true);
+
+  leadInput(mod, false);
+
+  assert.deepStrictEqual(switchCommands(calls), [false],
+    "a relay held on by the clock alone must come off when the clock opens");
+});
+
 test("the poll offsets separate the tanks, not the devices", () => {
   // Left top and left bottom share a slot on purpose: the top element sits in the
   // stratified layer and almost never calls, so the pair is one 2.7 kW load in practice.
@@ -775,6 +817,46 @@ test("the poll offsets separate the tanks, not the devices", () => {
 
   assert.strictEqual(loadShortageLead().mod.state.pollOffset, 0,
     "the shortage lead has no dump load to space out, and everything else waits on it");
+});
+
+// How long this relay waits before its loop starts, given the clock it reads at startup.
+// Zero means it began polling straight away, already on its slot.
+function pollWait(deviceId, unixtime) {
+  const { mod, timers } = loadRelay(deviceId);
+  global.Shelly.getComponentStatus = function (key) {
+    return key === "sys" && unixtime
+      ? { unixtime: unixtime, last_sync_ts: unixtime - 800 }
+      : null;
+  };
+
+  mod.finishSetup();
+
+  const deferred = timers.filter((t) => t.repeat === false);
+  if (deferred.length === 0) {
+    return 0;
+  }
+  assert.strictEqual(deferred.length, 1, "more than one timer held the loop back");
+  return deferred[0].ms;
+}
+
+test("the poll is phased to the clock, so the offsets share an origin", () => {
+  // Start times do not agree on where a window begins - deploy two relays 20 seconds apart
+  // with offsets 10 seconds apart and they land on the same tick. The clock does agree, so
+  // each relay waits for the moment the clock comes round to its own slot, whenever it
+  // happened to start.
+  const at = 1788350600; // 20 seconds into a 30-second window
+
+  [[LEFT_TOP, 0], [LEAD_RELAY, 0], [RIGHT, 10], [ANNEX, 20]].forEach((pair) => {
+    const wait = pollWait(pair[0], at);
+    assert.strictEqual((at + wait / 1000) % 30, pair[1],
+      pair[0] + " does not poll in its own slot");
+  });
+});
+
+test("an unsynchronised clock falls back to a start-relative offset", () => {
+  // Nothing shared to anchor to, so the offset is worth what it was before: something for
+  // a site-wide restart, nothing for a staggered one.
+  assert.strictEqual(pollWait(ANNEX, 0), 20 * 1000);
 });
 
 test("a staggered relay checks at once, then starts its loop late", () => {
