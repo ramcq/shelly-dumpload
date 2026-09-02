@@ -15,6 +15,9 @@
 # Heat Pump Enable: same script, role resolved from the device ID
 192.168.1.109:1:soc-relay-controller.js:Heat Pump Enable
 
+# Boiler Release: follows the heat pump lock and the DHW time clock
+192.168.1.110:1:heating-relay-controller.js:Boiler Release
+
 # Thermal Dump Controller (1x device)
 192.168.1.104:1:thermal-dump-controller.js:Thermal Dump
 

@@ -87,6 +87,14 @@ stopping the whole controller, not just the stage being changed.
 the shortage lead drops every dump-load gate, and that the immersions keep every one of
 them.
 
+`heating-relay-controller.js` is tested for the cases where a rung looks satisfied and is
+not — a generator start reaching the rung below it, a fourteen-day timer read off a clock
+that has never synchronised, a fire lit on a power system nobody can read — and for the
+order of the ladder itself, since every rung ends in the same relay and only the ordering
+says which of them may speak. `Shelly.call` records its callback as well as its arguments, so
+a test can answer an RPC as the device would, which is what makes "the key has never been
+written" reachable.
+
 ## Scripts Overview
 
 ### soc-relay-controller.js
@@ -287,6 +295,96 @@ Output ON + Voltage ≥ 200V + Power ≤ 5W = Thermal cutout detected
 
 ---
 
+### heating-relay-controller.js
+**Device:** Shelly 1 Mini Gen3 (Boiler Release)
+**Purpose:** Close the Fröling's volt-free release contact when anything on the site wants
+wood burnt
+
+Releasing is permission, never a command: the boiler holds its own 70 °C buffer target and
+decides for itself whether it fires. So a release that turns out to be unnecessary costs
+nothing, and a release granted too readily costs wood that cannot be un-burnt.
+
+**The ladder.** One rung at a time, first match wins — the relay has only one position to be
+in, so the order is what each rung is worth as an *explanation*, not what it is worth as a
+reason.
+
+| | Rung | Reads | Waits |
+|---|---|---|---|
+| 1 | H1, the Grant's back-up heater request | its own `input:0` | nothing — hardware `follow` has already closed the relay, and the script's job is not to undo it |
+| 2 | DHW demand | .123's `input:0`, which is the DHW time clock | nothing — a request for heat the system may not have |
+| 3 | The power system | `vebus/276/State`, then .209's switch status | 30 min on VE.Bus; nothing on the lock |
+| 4 | Exercise run | `digitalinput/102/State`, against a timestamp in KVS | 14 days with no observed ignition |
+
+**Rung 3 reads VE.Bus first, and that ordering is the whole of it.** .209 opens the heat pump
+lock *because* VE.Bus left Inverting, so while that is true the lock is the same fact
+arriving a second time — and taking it at face value would release the boiler the instant a
+generator started. Reading VE.Bus first leaves the lock exactly one thing left to mean:
+
+- **VE.Bus unreadable** — never heard, or stale after a broker drop — and the rung asks for
+  nothing. The Fröling's augers, fan and pump all run off the house supply, so releasing the
+  boiler because the power system cannot be read risks lighting a fire and then losing
+  circulation. The Cerbo is also what connects the BMS to the inverter, so a Cerbo this
+  controller cannot hear is a power system in trouble rather than one it is merely unsure
+  about
+- **VE.Bus not inverting** — a generator run, a passthrough, a fault, an overload start — and
+  the boiler is released once that has been true for 30 minutes, which clears the fortnightly
+  generator test run (20 minutes minimum runtime) without knowing anything about generators.
+  *Or* immediately if the relay is already on, because whatever released it had already
+  waited and a script that has just restarted cannot measure what it did not watch
+- **VE.Bus inverting, lock open** — nothing but a low battery opens the lock without taking
+  VE.Bus out of Inverting, and a battery at 30% is released by reaching 90% rather than by
+  the minute passing. Nothing to wait for
+- **VE.Bus inverting, lock closed or unheard** — nothing. An undeployed or unreachable .209
+  leaves this relay with H1 in hardware, which is what it had before the Shelly was there
+
+Why it follows a relay rather than the shortage terms is
+[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md); which case is which
+is [CONTROLS.md](CONTROLS.md).
+
+**Minimum on time:** a release *this script* granted is not withdrawn for 60 minutes,
+whatever changes underneath it — by then the boiler may have begun an ignition cycle, which
+is the expensive part and the part that wears. It says nothing about a relay H1 is holding
+closed, or one a previous run left closed: `follow` opens the first on the H1 edge, and
+undoing the hardware is not what the rule is for. See [Dwell Timers](#dwell-timers) for the
+other two in the repo and how this one differs.
+
+**The exercise run:** the rule and the reasoning are in
+[CONTROLS.md](CONTROLS.md#exercise-run). What this script holds:
+- `config.kvs.lastIgnition`, the timestamp every observed ignition rewrites — except a
+  re-ignition inside the hold, since a lit boiler cycles several times a day and the value is
+  only ever read against fourteen days
+- The KVS read, seeded with the current time where there is no record *or none that can be
+  read*, and retried on every poll until it lands
+- `syncedNow()`, which is `sys.unixtime` only where `sys.last_sync_ts` says the clock has
+  actually been set. The exercise run is the one thing here measured across a reboot, so it
+  is also the only one that needs a clock the device did not invent, and it is inert without
+  one. Every wait is timed within a single run and uses `Date.now()`
+
+**A restart, with the boiler already burning:** the contact outlives the script, and every
+reading that could justify it arrives over MQTT some time after the script starts. So a relay
+found closed is left alone while any of those readings is still outstanding — past
+`config.startupGrace`, silence is taken at face value. Nothing else is reconstructed: rung 3's
+"already on" clause is what carries a burn through a redeploy, and it needs no stored state
+because the relay itself is the state.
+
+**MQTT Subscriptions:** four — the lock, the DHW time clock, `vebus/276/State` and the
+boiler input. Both relay inputs and both Victron paths are silent between transitions, so all
+four are asked for rather than waited on; see
+[Seeding State From Other Devices](#seeding-state-from-other-devices).
+
+**Configuration:**
+- One device, matched on the ID it reports at startup. .123 is next door in the same cupboard
+  and its relay looks identical, so an unrecognised device runs nothing at all and leaves the
+  relay with H1 in hardware
+- Requires the relay to be `follow` with `initial_state: "match_input"` — see the relay
+  configuration table in [CONTROLS.md](CONTROLS.md)
+- No alerting: the Fröling has its own remote monitoring, which is where boiler faults belong
+
+**Virtual Components:**
+- `text:200` - Status display
+
+---
+
 ## Common Patterns
 
 ### Re-entrancy Prevention
@@ -337,6 +435,12 @@ a different reason: its allocator needs each stage's state to stand still long e
 budget against — a locked stage that is on consumes its nominal power whether or not it has
 been re-measured.
 
+`heating-relay-controller.js` keeps an asymmetric **`minimumOnTime`** (60 minutes), the only
+one-directional rule of the three. A dump load's whole value is that shedding it is free,
+which is why `soc-relay` dropped the minimum on time it used to have; a boiler that may
+already have begun an ignition cycle is the opposite case, and only in one direction. So
+nothing delays the release and nothing but time withdraws it.
+
 ### MQTT Subscription Budget
 A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions`
 and the script does not run at all, so overrunning the cap takes out every load that
@@ -364,7 +468,8 @@ subscriptions are in — from a later turn of the main loop, as with the keepali
 on every 30-second keepalive until the answer arrives, since the request is as losable as
 the answer. `soc-relay-controller.js` asks the lead relay for its time switch input;
 `surplus-dump-controller.js` asks each remote device for its stages' switch status, one ask
-per device rather than per stage.
+per device rather than per stage; `heating-relay-controller.js` asks .209 for the heat pump
+lock and .123 for the DHW time clock.
 
 Surplus keeps a bounded wait behind that ask, `statusSeedTimeout`: it will not disturb loads
 already running before every stage has reported, but past the bound the silent stages are

@@ -16,7 +16,8 @@ The division of labour across the documentation:
 | [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
 
 **Status.** The dump load side is live and has been for months. On the heating side the
-heat pump lock is written, and the immersions shed with it; the other two relays are not.
+heat pump lock is written, the immersions shed with it, and the biomass release follows it;
+the DHW enable is designed and not yet written.
 
 | Behaviour | State |
 |---|---|
@@ -24,7 +25,8 @@ heat pump lock is written, and the immersions shed with it; the other two relays
 | Buffer immersions tracking surplus | Live |
 | Thermal recovery from stalled buffer immersions | Live |
 | Shortage, the heat pump lock and the immersions shedding with it | Written, not yet deployed |
-| Biomass release, DHW enable | **Designed only** |
+| Biomass release — H1, DHW demand, sustained shortage, exercise run | Written, not yet deployed |
+| DHW enable | **Designed only** |
 
 ---
 
@@ -170,7 +172,7 @@ running, relay open means shortage. No retained flag, no second copy of a thresh
 | Follower | Reads | Does |
 |---|---|---|
 | DHW immersions (.88 .90 .91 .100) | .209's switch status | Sheds, time switch included, while it is open |
-| Boiler Release (.164) | .209's switch status, plus `vebus/276/State` | Releases the boiler on sustained shortage |
+| Boiler Release (.164) | `vebus/276/State` first, then .209's switch status; the DHW time clock and the boiler input for its other rungs | Releases the boiler on sustained shortage |
 | DHW Enable (.123) | .209's switch status | Opens a shortage DHW window |
 
 **What travels is the lock, not shortage.** A follower asks "is the heat pump running", which
@@ -186,13 +188,30 @@ you want it, and the biomass and DHW relays follow. Nothing recomputes around yo
 .164 needs to distinguish the two terms — release now on a battery shortage, wait 30 minutes
 on a VE.Bus one — and infers the cause rather than holding a threshold:
 
-| .209 relay | VE.Bus | .164 concludes |
+| VE.Bus | .209 relay | .164 does |
 |---|---|---|
-| Open | Inverting (9) | Must be the SOC term — release now |
-| Open | Anything else | Could be transient — wait 30 minutes |
+| Unreadable | Anything | Nothing. A power system that cannot be read is not one to light a fire on |
+| Not inverting | (open, necessarily) | Releases once it has been so for 30 minutes |
+| Inverting (9) | Open | Releases at once: nothing but the battery opens it from here |
+| Inverting (9) | Closed or unheard | Nothing |
 
-With no dwell on .209 the inference is exact, give or take one 30-second poll, so .164 needs
-only a token dwell to cover that and no VE.Bus history of its own.
+**VE.Bus is read first, and that ordering is the rule rather than an implementation detail.**
+.209 opens the lock *because* VE.Bus left Inverting, so while that is true the lock is the
+same fact arriving a second time; taking it at face value would release the boiler the
+instant a generator started. Reading VE.Bus first leaves the lock exactly one thing left to
+mean, so .164 needs no history of its own and infers nothing — the two readings are one
+condition answered in order, not a deduction.
+
+The unreadable row is not caution about a doubtful reading. The Fröling's augers, fan and
+pump all run off the house supply, and the Cerbo is what connects the BMS to the inverter, so
+a Cerbo .164 cannot hear is a power system in trouble: lighting a fire on one risks losing
+circulation to it. The heating side quiesces and waits for an operator, which leaves .164 the
+floor it has anyway — H1, in hardware.
+
+One thing the ordering gives up: .209 restarting on an unresolved latch shows as an open lock
+with VE.Bus at 9, so .164 reads it as the battery and releases at once. At night on a
+mid-band battery with no generation — the only time that persists — burning wood is a
+reasonable answer.
 
 The 30, 90 and 500 W numbers therefore exist in exactly one deployment, on one device.
 
@@ -413,13 +432,31 @@ giving every moving part the opportunity to move; the hopper cannot be emptied e
 digging or burning.
 
 Fourteen days with no observed ignition releases the boiler. The release is held for one hour
-after ignition, then dropped. The Fröling still self-gates on buffer temperature, so in
+after ignition, then dropped. Every release also stands for an hour whatever else changes,
+because by then the boiler may have begun an ignition cycle, which is the expensive part —
+so the two are the same hour, and nothing here withdraws a burn it has just asked for. The Fröling still self-gates on buffer temperature, so in
 summer with the immersions holding the buffer at 75 °C the release may sit asserted for days
 before anything happens — harmless, and no reason to build a second buffer control on top of
 the one the boiler already has.
 
 Last-ignition time lives in Shelly KVS, not RAM, or a reboot resets it. Seed it with the
-current time on first run so a redeploy never triggers a burn.
+current time on first run so a redeploy never triggers a burn, and treat a record that
+cannot be read the same way: seeding delays an exercise by fourteen days, while reading a
+missing record as "no ignition ever" lights the boiler on the next poll. Fourteen days is
+also not an interval a script can time, so the term needs a clock the device did not
+invent — one that has actually synchronised, rather than one that merely reads plausibly —
+and is inert without it.
+
+The boiler input is what completes an exercise run — it is how the release learns the boiler
+lit, and so when to stop asking — and it arrives from the Cerbo like everything else. So an
+unavailable boiler input disables the exercise run outright rather than as a separate rule:
+there is nothing to start that could be finished. That is the same answer the power system
+gives for its own reasons, reached from the other end, and a run interrupted that way resumes
+when the Cerbo does.
+
+Any observed ignition resets the fourteen days, whoever asked for it, because they all move
+the same augers — but only an ignition does. A release the boiler declines, which is what
+summer looks like with the immersions holding the buffer at 75 °C, has exercised nothing.
 
 ---
 
@@ -482,7 +519,7 @@ or the lead relay closed for its own reasons without giving up the hardware path
 |---|---|---|---|---|
 | `soc-relay-controller.js` | .209 | existing, reconfigured | Express shortage on its relay; no dump load gates | Written |
 | `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; shed while it is open, time switch included | Written |
-| `heating-relay-controller.js` | .164 | new | Sustained shortage from .209 and VE.Bus; H1; DHW demand; exercise run | To do |
+| `heating-relay-controller.js` | .164 | new | H1; DHW demand; the power system, VE.Bus before the lock; exercise run | Written |
 | `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status | To do |
 
 .209 runs the same file as the four DHW immersions. They share the shortage rule, and above
@@ -557,9 +594,11 @@ restarting during a hot water window ignores the time switch until the clock nex
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under
 it. So the topic sets stay deliberately small: the immersions run seven — five Victron
-paths, the lead relay's input and .209's switch — and .209 runs five. Following the lock
-rather than deriving it is what keeps .164 at two and .123 at five; deriving it would have
-cost each of them the four Victron paths the terms rest on.
+paths, the lead relay's input and .209's switch — .209 runs five, and .164 runs four: the
+lock, the DHW time clock, `vebus/276/State` and the boiler input. Following the lock rather
+than deriving it is what keeps .164 at four and .123 at five; deriving it would have cost
+each of them SOC, both generation figures and the inverter output — the four paths the terms
+rest on — which would have put .164 at eight and .123 at nine.
 
 ### Prerequisites
 
