@@ -277,6 +277,71 @@ test("a broker drop makes the VE.Bus state unknown again", () => {
   assert.strictEqual(mod.state.vebusState, 0);
 });
 
+// ===== The device's own MQTT config =====
+
+// Connected is the ordinary case: the device's MQTT client is up long before the script
+// starts, so a check that only ran when offline would never run at all - which is where
+// this one used to sit.
+function connectedWith(mqttConfig) {
+  global.Shelly.getComponentStatus = function () { return { connected: true }; };
+  global.Shelly.getComponentConfig = function () { return mqttConfig; };
+}
+
+function serverFor(mod) {
+  return mod.config.cerbo.host + ":" + mod.config.cerbo.port;
+}
+
+// This device's own light:0 is buffer immersion 3, and the thermal dump controller watches
+// its published status for a cutout it has no other way of seeing.
+test("status notifications are turned on if the device has them off", () => {
+  const { mod, calls } = loadController();
+  connectedWith({ enable: true, server: serverFor(mod), status_ntf: false });
+
+  mod.connectMqtt();
+
+  const setConfig = calls.filter((c) => c.method === "MQTT.SetConfig");
+  assert.strictEqual(setConfig.length, 1,
+    "immersion 3 was left able to boil with nothing watching it");
+  assert.strictEqual(setConfig[0].params.config.status_ntf, true);
+});
+
+test("an already-configured device is not reconfigured or rebooted", () => {
+  const { mod, calls } = loadController();
+  connectedWith({ enable: true, server: serverFor(mod), status_ntf: true });
+
+  mod.connectMqtt();
+
+  assert.deepStrictEqual(
+    calls.filter((c) => c.method === "MQTT.SetConfig" || c.method === "Shelly.Reboot"), [],
+    "a settled device must not reboot on every script start");
+});
+
+test("a firmware without a status notification setting is not rebooted", () => {
+  const { mod, calls } = loadController();
+  connectedWith({ enable: true, server: serverFor(mod) }); // no status_ntf key at all
+
+  mod.connectMqtt();
+
+  assert.deepStrictEqual(
+    calls.filter((c) => c.method === "MQTT.SetConfig" || c.method === "Shelly.Reboot"), [],
+    "an absent key would reboot the device on every script start, forever");
+});
+
+test("a disconnect handler is installed even when MQTT is already connected", () => {
+  const { mod, handlers } = loadController();
+  connectedWith({ enable: true, server: serverFor(mod), status_ntf: true });
+  victron(mod, "vebusState", INVERTING);
+
+  mod.connectMqtt();
+  assert.strictEqual(typeof handlers.disconnect, "function",
+    "nothing would ever notice the broker going away");
+
+  handlers.disconnect();
+  assert.strictEqual(mod.state.vebusReceived, false,
+    "a lost broker must not leave a state nobody will repeat");
+  assert.strictEqual(mod.state.mqttConnected, false);
+});
+
 test("the status line tells an unheard VE.Bus state from Off", () => {
   const { mod } = loadController();
 

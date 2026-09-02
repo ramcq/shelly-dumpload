@@ -489,9 +489,13 @@ nothing at all: the controller commands nothing, which leaves the relay in the u
 behaviour the configuration table above guarantees — where guessing would have run .209 as
 an immersion, locked below 95% and shed by the overload path.
 
-The script asserts `status_ntf` in the device's MQTT config. Every follower reads .209's
-published switch status, and the immersions read the lead relay's input, so a device with
-status notifications off is a controller whose decision never leaves it.
+Every controller asserts `status_ntf` in its own device's MQTT config, rebooting once to set
+it if it is off. Followers read .209's published switch status and the immersions read the
+lead relay's input, so a device with notifications off is a controller whose decision never
+leaves it; the thermal dump reads the buffer immersions', the surplus controller's own
+`light:0` among them, so there it is a stage that boils with nothing watching. The check has
+to run whether or not the client is already connected — on a device that has been up for
+weeks it always is, which is where the same check twice sat and never ran.
 
 The Victron broker behaves the same way, and worse for a value that rarely changes: it
 publishes nothing until a value changes, and the one chance at the rest is the republish an

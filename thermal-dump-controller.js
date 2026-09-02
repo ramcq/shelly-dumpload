@@ -527,8 +527,59 @@ function resetMqttData() {
   logDebug("Reset MQTT data due to disconnection");
 }
 
+// Bring the device's own MQTT config up to what this controller needs. Returns true if a
+// reconfigure is under way, which ends in a reboot and so ends this script's run.
+function ensureMqttConfig() {
+  let mqttConfig = Shelly.getComponentConfig("mqtt");
+  if (!mqttConfig) {
+    logDebug("No MQTT config available");
+    return false;
+  }
+
+  let needsConfig = false;
+
+  if (!mqttConfig.enable) {
+    needsConfig = true;
+    logDebug("MQTT is disabled, enabling it");
+  } else if (mqttConfig.server !== config.cerbo.host + ":" + config.cerbo.port) {
+    needsConfig = true;
+    logDebug("MQTT server doesn't match, reconfiguring");
+  } else if (mqttConfig.status_ntf === false) {
+    // Nothing follows this device, but the same setting carries its own two channels and
+    // its status text, which is the only account of what the thermal dump did that can be
+    // read from anywhere but the plant room. Tested for false, not for not-true: a
+    // firmware without the key must not reboot on every start.
+    needsConfig = true;
+    logDebug("MQTT status notifications are off, reconfiguring");
+  }
+
+  if (!needsConfig) {
+    return false;
+  }
+
+  Shelly.call("MQTT.SetConfig", {
+    config: {
+      enable: true,
+      server: config.cerbo.host + ":" + config.cerbo.port,
+      status_ntf: true
+    }
+  }, function(result, error_code, error_message) {
+    if (error_code !== 0) {
+      console.log("Error configuring MQTT: " + error_message);
+      return;
+    }
+
+    logDebug("MQTT configured, rebooting device...");
+    Shelly.call("Shelly.Reboot", {});
+  });
+
+  return true;
+}
+
 function connectMqtt() {
-  // Always set up MQTT event handlers (before any early returns)
+  // Handlers and config first, unconditionally: the device's MQTT client is usually
+  // connected before this script starts, and the config check used to sit behind that
+  // early return, where it never ran at all.
   MQTT.setConnectHandler(handleMqttConnected);
 
   MQTT.setDisconnectHandler(function() {
@@ -541,6 +592,10 @@ function connectMqtt() {
       state.keepaliveTimer = null;
     }
   });
+
+  if (ensureMqttConfig()) {
+    return; // reboot pending
+  }
 
   // Check if MQTT is already connected
   let mqttStatus = Shelly.getComponentStatus("mqtt");
@@ -560,37 +615,7 @@ function connectMqtt() {
     resetMqttData();
   }
 
-  logDebug("Attempting to connect to MQTT at " + config.cerbo.host + ":" + config.cerbo.port);
-
-  // Configure MQTT if needed
-  let mqttConfig = Shelly.getComponentConfig("mqtt");
-  let needsConfig = false;
-
-  if (!mqttConfig.enable) {
-    needsConfig = true;
-    logDebug("MQTT is disabled, enabling it");
-  } else if (mqttConfig.server !== config.cerbo.host + ":" + config.cerbo.port) {
-    needsConfig = true;
-    logDebug("MQTT server doesn't match, reconfiguring");
-  }
-
-  if (needsConfig) {
-    Shelly.call("MQTT.SetConfig", {
-      config: {
-        enable: true,
-        server: config.cerbo.host + ":" + config.cerbo.port
-      }
-    }, function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error configuring MQTT: " + error_message);
-        return;
-      }
-
-      logDebug("MQTT configured, rebooting device...");
-      Shelly.call("Shelly.Reboot", {});
-    });
-    return;
-  }
+  logDebug("Waiting for MQTT connection to " + config.cerbo.host + ":" + config.cerbo.port);
 }
 
 // ===== Device state management =====
