@@ -888,6 +888,22 @@ test("an unresolved shortage says which reading is missing", () => {
   assert.ok(text.indexOf("SHORTAGE") < 0, text);
 });
 
+test("a relay says its own name and which way its contact is", () => {
+  assert.ok(statusText(loadImmersion().mod).indexOf("DHW Left Top OFF") >= 0,
+    "an immersion did not name itself");
+  assert.ok(statusText(loadShortageLead().mod).indexOf("HP Enable OFF") >= 0,
+    "the shortage lead did not name itself");
+});
+
+test("the band on the shortage lead is the shortage terms", () => {
+  // Not a dump load band - it has none - but it reads the same way round, because the
+  // relay closes at the high threshold and opens at the low one.
+  const { mod } = loadShortageLead();
+
+  assert.ok(statusText(mod).indexOf("[On:90%, Off:30%]") >= 0,
+    "the shortage band is the one thing .209's band could be: " + statusText(mod));
+});
+
 test("the shortage lead reports no lead input it never receives", () => {
   // It subscribes to no time-switch topic, so leadInputActive never leaves its initial
   // value - and reporting that as OFF is an invented reading, not a quiet one.

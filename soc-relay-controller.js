@@ -57,7 +57,7 @@ let config = {
     { id: "dcda0ce04fb0", name: "DHW Right",        high: 95, pollOffset: 10 * 1000 },
     { id: "dcda0ce06e98", name: "DHW Annex",        high: 96, pollOffset: 20 * 1000 },
     // Not a dump load and has no SOC band of its own: its relay is shortage, expressed.
-    { id: "d885ac0a3668", name: "Heat Pump Enable", shortageLead: true }
+    { id: "d885ac0a3668", name: "HP Enable", shortageLead: true }
   ],
 
   // Shortage, worked out by the shortage lead alone and expressed on its relay. Everything
@@ -351,15 +351,24 @@ function getVebusStateString(vebusState) {
 // Update the status display
 function updateStatus(event) {
   let socPart = state.currentSoc > 0 ? state.currentSoc + "%" : "No SOC";
-  // The shortage lead has no SOC band of its own: its relay is the shortage terms.
+  // The shortage lead's band is the shortage terms, not a dump load's: its relay closes at
+  // the high threshold and opens at the low one, so it reads the same way round.
   let thresholdInfo = state.isShortageLead
-    ? ""
+    ? " [On:" + config.shortage.highSoc + "%, Off:" + config.shortage.lowSoc + "%]"
     : " [On:" + state.highSocThreshold + "%, Off:" + state.lowSocThreshold + "%]";
 
-  // On .209 the relay is the shortage state itself, so say what it means.
-  let relayPart = state.isShortageLead
-    ? (state.relayIsOn ? "Heat pump enabled" : "SHORTAGE: heat pump locked")
-    : (state.relayIsOn ? "Relay ON" : "Relay OFF");
+  let relayPart = state.deviceName + (state.relayIsOn ? " ON" : " OFF");
+  let totalGen = state.acGeneration + state.dcGeneration;
+  let genPart = ", Gen " + totalGen.toFixed(0) + "W";
+  let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
+
+  let vebusPart = ", VE " + getVebusStateString(state.vebusState);
+  let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
+  // Only a relay that actually follows one reports it. The lead relay reads the time switch
+  // on its own input, and the shortage lead subscribes to no time-switch topic at all, so
+  // for either of them a "Lead" would be the initial value dressed up as a reading.
+  let leadPart = state.leadRelayTopic ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
+
   // .209 says which term is short; a follower says what the lock is doing, and says
   // nothing at all until it has heard, so an immersion running against a .209 that is not
   // there reads exactly as it did before.
@@ -373,18 +382,8 @@ function updateStatus(event) {
       shortagePart = ", SHORTAGE: " + shortageReason();
     }
   } else if (state.lockKnown) {
-    shortagePart = state.lockIsClosed ? ", HP unlocked" : ", SHORTAGE: heat pump locked";
+    shortagePart = state.lockIsClosed ? ", HP Enabled" : ", HP Locked";
   }
-  let totalGen = state.acGeneration + state.dcGeneration;
-  let genPart = ", Gen " + totalGen.toFixed(0) + "W";
-  let inverterPart = state.inverterOutput > 0 ? ", Inv " + state.inverterOutput.toFixed(0) + "W" : "";
-
-  let vebusPart = ", VE " + getVebusStateString(state.vebusState);
-  let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
-  // Only a relay that actually follows one reports it. The lead relay reads the time switch
-  // on its own input, and the shortage lead subscribes to no time-switch topic at all, so
-  // for either of them a "Lead" would be the initial value dressed up as a reading.
-  let leadPart = state.leadRelayTopic ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
 
   let eventPart = event ? ": " + event : "";
 

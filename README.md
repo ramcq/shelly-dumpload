@@ -150,7 +150,7 @@ boolean and one subscription, and sheds while the lock is open. See
 - Reads its latch back off its own relay contact on a script restart, trusting it only where the switch's last-command `source` shows something commanded it
 - Every dump load gate dropped: no generation gate, no headroom check, no overload fast-path. The heat pump is a load, not a dump, and overload reaches it through the VE.Bus term once the generator starts
 - `followTimeSwitch: false` — nothing is wired to its input, and hot water is no reason to run the heat pump on a flat battery
-- Status text reads `SHORTAGE: heat pump locked`, since this relay is the shortage state expressed physically
+- Status text names the relay and its position — `HP Enable OFF` — with the shortage term that put it there appended, e.g. `SHORTAGE: SOC 28%`. The band it shows is `config.shortage`, `[On:90%, Off:30%]`, which reads the same way round as a dump load's because the relay closes at the high threshold and opens at the low one
 - Requires the relay to be `detached` with `initial_state: "on"` — see the relay configuration table in [CONTROLS.md](CONTROLS.md)
 
 **Configuration:**
@@ -435,7 +435,7 @@ Device addresses are in [POWER.md](POWER.md).
 
 Example output:
 ```
-{"value":"97% [On:96%, Off:95%], Relay ON, Gen 8530W, Inv 414W, VE Inverting, Input OFF, Lead OFF, HP unlocked: Monitoring","source":"sys","last_update_ts":1771542699}
+{"value":"97% [On:96%, Off:95%], DHW Left Top ON, Gen 8530W, Inv 414W, VE Inverting, Input OFF, Lead OFF, HP Enabled: Monitoring","source":"sys","last_update_ts":1771542699}
 ```
 
 ---
