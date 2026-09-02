@@ -196,7 +196,8 @@ switch still makes hot water with no script running at all.
 Live behaviour, for context. Per-script detail is in [README.md](README.md).
 
 **DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
-threshold (96/95, 95/94, 94/93, 96/95) so they stagger rather than all switching at once.
+threshold — 96/95 on .88, 94/93 on .90, 95/94 on .91, 96/95 on .100 — so they stagger
+rather than all switching at once.
 Each checks that generation exceeds 500 W before enabling, so a dump is never *started* out
 of the battery when renewables are short, and checks inverter headroom before adding its
 2.7 kW. Turn-off is purely SOC and waits out no dwell: once the low threshold is crossed,
@@ -380,16 +381,19 @@ because `deploy.py` uploads one file unaltered and the four immersions must keep
 exactly as they do. Matching `d885ac0a3668` pins the thresholds at 90/30 and drops all three
 dump-load gates: `minGenerationPower: 0` for the generation gate, `inverter.heaterPower: 0`
 for the headroom check and the overload fast-path, and `followTimeSwitch: false` so neither
-its own input nor the lead relay's can unlock the heat pump. Identity is resolved before the
-virtual components are created, since the role decides the threshold they are created with.
+its own input nor the lead relay's can unlock the heat pump.
 
-**Neither threshold is exposed on the device.** The immersions keep their persisted
-threshold slider, and .209 is created without one: component `202` is shared with the old
-`smart-load-controller.js` and stops at 50, so it can neither express the 30% entry nor be
-trusted not to carry a stale value that would move the shortage exit while the entry stayed
-pinned. Both numbers are properties of the system rather than preferences, and they live in
-the file, in one deployment. Immersions keep deriving their low threshold as
-`highThreshold - 1`, which is the stagger they exist to have.
+**No threshold is exposed on any device.** Every relay's numbers live in one table in the
+file, matched on the ID the device reports at startup. They are properties of the system
+rather than preferences — the immersion stagger exists so that four 2.7 kW loads come on in
+turn, and the shortage band is a fact about the generator and the batteries — so a slider
+would be a knob for something nobody should turn. It would also drift: component `202` is
+shared with the old `smart-load-controller.js` and stops at 50, so on .209 it can neither
+express the 30% entry nor be trusted not to carry a stale value, and on the immersions it
+put the documented stagger on the devices in one place and in this document in another,
+where the two had already disagreed about .90 and .91. A persisted component left behind by
+either script is now ignored rather than read. Immersions still derive their low threshold
+as `high - 1`; only a band too wide to derive is stated outright.
 
 An identity that cannot be read is retried rather than guessed, and the controller commands
 nothing until it succeeds. Falling back to the dump load defaults would run .209 as an

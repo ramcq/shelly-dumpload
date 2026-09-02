@@ -14,8 +14,9 @@ const { load } = require("./harness.js");
 
 const DUMP = "soc-relay-controller.js";
 
-const HEAT_PUMP_ENABLE = "shelly1minig3-d885ac0a3668"; // .209
-const LEAD_RELAY = "shellypmg3-543204558fc8"; // .90, Left Bottom
+const HEAT_PUMP_ENABLE = "shelly1minig3-d885ac0a3668"; // .209, 90/30
+const LEAD_RELAY = "shelly1pmg3-543204558fc8"; // .90, Left Bottom, 94/93, time switch
+const LEFT_TOP = "shelly1pmg3-543204558c6c"; // .88, 96/95, a plain follower
 const PORTAL = "c0847dc9a794";
 
 const INVERTING = 9;
@@ -23,24 +24,24 @@ const PASSTHRU = 8;
 
 const MINUTES = 60 * 1000;
 
-// A DHW immersion: the file as deployed, no role applied. The harness never runs the
-// GetDeviceInfo callback, so identity is settled here as that callback would.
-function loadImmersion() {
+// One relay from the table, settled as the GetDeviceInfo callback would settle it - the
+// harness never runs that callback, since Shelly.call does not call back.
+function loadRelay(deviceId) {
   const loaded = load(DUMP);
+  assert.strictEqual(loaded.mod.applySettingsForDevice(deviceId), true,
+    deviceId + " is not in the relay table");
   loaded.mod.assignLeadRelayTopic();
   loaded.mod.state.identityKnown = true;
   return loaded;
 }
 
-// The shortage lead, with its role resolved from its device ID as at startup.
+// A plain follower: no time switch on its own input, and it is not the shortage lead.
+function loadImmersion() {
+  return loadRelay(LEFT_TOP);
+}
+
 function loadShortageLead() {
-  const loaded = load(DUMP);
-  assert.strictEqual(
-    loaded.mod.applyRoleForDevice(HEAT_PUMP_ENABLE), true,
-    "the heat pump enable relay was not recognised as the shortage lead");
-  loaded.mod.assignLeadRelayTopic();
-  loaded.mod.state.identityKnown = true;
-  return loaded;
+  return loadRelay(HEAT_PUMP_ENABLE);
 }
 
 function victron(mod, key, value) {
@@ -66,31 +67,45 @@ function switchCommands(calls) {
 
 // ===== Role resolution =====
 
-test("identity is resolved before the virtual components are created", () => {
-  // The role decides the threshold a persisted component is created with, so it
-  // cannot be resolved after the component already exists with the wrong default.
+test("identity is resolved before anything else runs", () => {
+  // Thresholds, gates and topics all depend on which relay this is, so nothing can
+  // happen before the device has matched itself against the table.
   const { calls } = loadImmersion();
   assert.strictEqual(calls[0].method, "Shelly.GetDeviceInfo",
     "startup does something before it knows which device it is on");
 });
 
 test("a DHW immersion is not the shortage lead", () => {
-  const { mod } = loadImmersion();
-  assert.strictEqual(mod.applyRoleForDevice(LEAD_RELAY), false);
+  const { mod } = loadRelay(LEAD_RELAY);
   assert.strictEqual(mod.state.isShortageLead, false);
+  assert.strictEqual(mod.state.isLeadRelay, true, "the table did not name the lead relay");
 });
 
-test("an immersion's low threshold is one point below its high threshold", () => {
-  const { mod } = loadImmersion();
-  assert.strictEqual(mod.config.soc.lowThreshold, null,
-    "an immersion derives its low threshold and must not pin one");
-  assert.strictEqual(mod.state.lowSocThreshold, mod.state.highSocThreshold - 1);
+test("the table carries the stagger the immersions exist to have", () => {
+  // A point apart, so they come on in turn rather than all at once. These are the values
+  // the sliders held before the table replaced them.
+  const expected = { "543204558c6c": 96, "543204558fc8": 94, "dcda0ce04fb0": 95,
+                     "dcda0ce06e98": 96 };
+  Object.keys(expected).forEach((id) => {
+    const { mod } = loadRelay(id);
+    assert.strictEqual(mod.state.highSocThreshold, expected[id], id);
+    assert.strictEqual(mod.state.lowSocThreshold, expected[id] - 1,
+      "an immersion derives its low threshold rather than pinning one");
+  });
 });
 
 test("the shortage thresholds are 90 to leave and 30 to enter", () => {
   const { mod } = loadShortageLead();
   assert.strictEqual(mod.state.highSocThreshold, 90);
-  assert.strictEqual(mod.state.lowSocThreshold, 30);
+  assert.strictEqual(mod.state.lowSocThreshold, 30,
+    "a 60-point band has to be stated outright, not derived");
+});
+
+test("a device not in the table runs nothing", () => {
+  const { mod } = load(DUMP);
+  assert.strictEqual(mod.applySettingsForDevice("shelly1pmg3-000000000000"), false);
+  assert.strictEqual(mod.state.identityKnown, false,
+    "a misdirected deploy must leave the relay in its unscripted behaviour");
 });
 
 test("no dwell timers in either role", () => {
@@ -100,29 +115,19 @@ test("no dwell timers in either role", () => {
   });
 });
 
-test("an immersion gets a threshold slider, the shortage lead does not", () => {
-  const immersion = loadImmersion();
-  immersion.mod.setupVirtualComponents([]);
-  const immersionNumbers = immersion.calls
-    .filter((c) => c.method === "Virtual.Add" && c.params.type === "number");
-  assert.strictEqual(immersionNumbers.length, 1);
-  assert.strictEqual(immersionNumbers[0].params.config.default_value, 95);
+test("no relay gets a threshold slider", () => {
+  const { mod, calls } = loadShortageLead();
+  mod.setupVirtualComponents([]);
 
-  // Component 202 is shared with smart-load-controller and its slider stops at 50, so it
-  // can neither express the 30% entry nor be trusted not to carry a stale value.
-  const heatPump = loadShortageLead();
-  heatPump.mod.setupVirtualComponents([]);
-  assert.deepStrictEqual(
-    heatPump.calls.filter((c) => c.method === "Virtual.Add" && c.params.type === "number"), [],
-    "the shortage thresholds must live in the file, not in a slider");
-
-  const group = heatPump.calls
-    .filter((c) => c.method === "Virtual.Add" && c.params.type === "group")[0];
-  assert.deepStrictEqual(group.params.config.components, ["text:204"]);
-  assert.strictEqual(group.params.config.name, "Heat Pump Enable");
+  const added = calls.filter((c) => c.method === "Virtual.Add");
+  assert.deepStrictEqual(added.map((c) => c.params.type), ["text"],
+    "the thresholds must live in the table, not in components on five devices");
+  assert.strictEqual(added[0].params.config.name, "Status");
 });
 
-test("the shortage lead ignores a threshold component that already exists", () => {
+test("a threshold component left behind on a device is not read", () => {
+  // The immersions carry a persisted number:202 from the script this one replaced, and
+  // .209 shares that id with smart-load-controller, whose slider stops at 50.
   const { mod } = loadShortageLead();
   global.Virtual.getHandle = function () {
     return { getValue: function () { return 95; }, on: function () {} };
@@ -585,9 +590,7 @@ test("the follower keeps asking until the lead answers", () => {
 });
 
 test("the lead relay does not ask itself", () => {
-  const { mod, published, timers } = loadImmersion();
-  mod.state.isLeadRelay = true;
-  mod.assignLeadRelayTopic();
+  const { mod, published, timers } = loadRelay(LEAD_RELAY);
 
   mod.handleMqttConnected();
   timers.filter((t) => t.repeat === false).pop().fn();

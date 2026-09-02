@@ -28,12 +28,23 @@ let config = {
     commandTopic: "shelly1pmg3-543204558fc8/command"       // where to ask it to republish
   },
 
-  // SOC control settings
-  soc: {
-    highThreshold: 95, // % - enable relay when SOC exceeds this value (configurable via UI)
-    lowThreshold: null // % - null derives it as highThreshold - 1; a wide band must be
-                       // stated outright
-  },
+  // Every device this file runs on, matched on the ID it reports at startup. The
+  // thresholds are properties of the stagger rather than preferences - each immersion sits
+  // a point below the last, so they come on in turn rather than all at once - and the
+  // shortage numbers are properties of the system. Neither is a knob, so both live here
+  // rather than in a slider that can drift from what the documents say.
+  //
+  // `low` is derived as `high - 1` unless stated: a wide band has to be stated outright.
+  // A device not listed here runs nothing, which is what makes a misdirected deploy safe.
+  relays: [
+    { id: "543204558c6c", name: "DHW Left Top",     high: 96 },
+    { id: "543204558fc8", name: "DHW Left Bottom",  high: 94, leadRelay: true },
+    { id: "dcda0ce04fb0", name: "DHW Right",        high: 95 },
+    { id: "dcda0ce06e98", name: "DHW Annex",        high: 96 },
+    // Not a dump load: 90 to leave shortage, above what a generator run reaches, and 30 to
+    // enter, ten points above the generator's autostart.
+    { id: "d885ac0a3668", name: "Heat Pump Enable", high: 90, low: 30, shortageLead: true }
+  ],
 
   // Inverter overload protection
   inverter: {
@@ -58,9 +69,6 @@ let config = {
   // Whether the manual time switch reaches this relay, locally or via the lead relay
   followTimeSwitch: true,
 
-  // Name of the virtual component group, so the role is visible in the device UI
-  groupName: "Dump Load Controller",
-
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
     batterySOC: "system/0/Dc/Battery/Soc",
@@ -70,20 +78,9 @@ let config = {
     inverterOutput: "vebus/276/Ac/Out/L1/P"            // VE.Bus inverter output power (W)
   },
 
-  // The shortage lead (.209) runs this file with different numbers and none of the dump
-  // load gates. Its thresholds live here, in one deployment, and nowhere else.
-  shortageLead: {
-    deviceId: "d885ac0a3668", // .209 Heat Pump Enable
-    name: "Heat Pump Enable",
-    highThreshold: 90,        // % - leave shortage. Above what a generator run reaches
-    lowThreshold: 30          // % - enter shortage. Ten points above generator autostart
-  },
-
   // Virtual component IDs (matches smart-load-controller.js for drop-in replacement)
   virtualComponents: {
-    highSocThreshold: 202,  // same as smart-load-controller VCOMP_HIGH_SOC
-    status: 204,            // same as smart-load-controller VCOMP_STATUS
-    group: 205              // same as smart-load-controller VCOMP_GROUP
+    status: 204  // same as smart-load-controller VCOMP_STATUS
   },
 
   // Debug mode
@@ -123,11 +120,10 @@ let state = {
   leadInputActive: false,    // State of the lead relay's input (manual time switch)
   leadInputReceived: false,  // Whether that state was ever published rather than assumed
 
-  // Control settings
-  highSocThreshold: config.soc.highThreshold,
-  lowSocThreshold: config.soc.lowThreshold !== null
-    ? config.soc.lowThreshold
-    : config.soc.highThreshold - 1,
+  // Control settings, taken from the relay table once this device knows which one it is
+  deviceName: "",
+  highSocThreshold: 0,
+  lowSocThreshold: 0,
 
   // Timer
   timerId: null
@@ -135,7 +131,6 @@ let state = {
 
 // ===== Virtual component handles =====
 let handles = {
-  highSocThreshold: null,
   status: null
 };
 
@@ -155,42 +150,41 @@ function arrayContains(array, value) {
   return false;
 }
 
-// One point below the high threshold unless stated outright, so the immersions track
-// their threshold slider.
-function lowThresholdFor(highThreshold) {
-  if (config.soc.lowThreshold !== null) {
-    return config.soc.lowThreshold;
-  }
-  return highThreshold - 1;
-}
-
 // Only a dump load sheds on overload or checks headroom: the shortage lead's relay is an
 // enable, not a load it could shed.
 function contributesToInverterOverload() {
   return config.inverter.heaterPower > 0;
 }
 
-// Resolve this device's role from its ID. Called before the virtual components are
-// created, since the role decides the threshold they are created with.
-function applyRoleForDevice(deviceId) {
-  let lead = config.shortageLead;
+// Match this device against the relay table and take its settings. Everything depends on
+// the answer - thresholds, gates, which topics to follow - so nothing runs before it, and
+// a device the table does not list runs nothing at all.
+function applySettingsForDevice(deviceId) {
+  for (let i = 0; i < config.relays.length; i++) {
+    let relay = config.relays[i];
 
-  if (deviceId.indexOf(lead.deviceId) < 0) {
-    return false;
+    if (deviceId.indexOf(relay.id) < 0) {
+      continue;
+    }
+
+    state.deviceName = relay.name;
+    state.isLeadRelay = relay.leadRelay === true;
+    state.isShortageLead = relay.shortageLead === true;
+    state.highSocThreshold = relay.high;
+    state.lowSocThreshold = relay.low !== undefined ? relay.low : relay.high - 1;
+
+    if (state.isShortageLead) {
+      // An enable, not a dump load: it runs regardless of surplus, has nothing to shed on
+      // overload, and hot water is no reason to run a heat pump on a flat battery.
+      config.minGenerationPower = 0;
+      config.inverter.heaterPower = 0;
+      config.followTimeSwitch = false;
+    }
+
+    return true;
   }
 
-  state.isShortageLead = true;
-  config.soc.highThreshold = lead.highThreshold;
-  config.soc.lowThreshold = lead.lowThreshold;
-  config.minGenerationPower = 0;   // not a dump load: it runs regardless of surplus
-  config.inverter.heaterPower = 0;
-  config.followTimeSwitch = false; // nothing is wired to its input
-  config.groupName = lead.name;
-
-  state.highSocThreshold = lead.highThreshold;
-  state.lowSocThreshold = lead.lowThreshold;
-
-  return true;
+  return false;
 }
 
 function getVebusStateString(vebusState) {
@@ -246,34 +240,6 @@ function updateStatus(event) {
 function setupVirtualComponents(existingComponentKeys) {
   let compId = config.virtualComponents;
 
-  // High SOC threshold component (user-configurable). Not on the shortage lead: the
-  // slider stops at 50, so it cannot express 30, and 202 is shared with
-  // smart-load-controller and could carry a stale value.
-  if (!state.isShortageLead &&
-      !arrayContains(existingComponentKeys, "number:" + compId.highSocThreshold)) {
-    console.log("Creating high SOC threshold component");
-    Shelly.call("Virtual.Add", {
-      type: "number",
-      id: compId.highSocThreshold,
-      config: {
-        name: "High SOC Threshold",
-        default_value: state.highSocThreshold,
-        min: 50,
-        max: 100,
-        meta: {
-          ui: {
-            view: "slider",
-            unit: "%",
-            step: 1
-          }
-        },
-        persisted: true
-      }
-    });
-  } else {
-    logDebug("High SOC threshold component exists");
-  }
-
   // Status display
   if (!arrayContains(existingComponentKeys, "text:" + compId.status)) {
     console.log("Creating status component");
@@ -294,23 +260,6 @@ function setupVirtualComponents(existingComponentKeys) {
     logDebug("Status component exists");
   }
 
-  // Group component
-  if (!arrayContains(existingComponentKeys, "group:" + compId.group)) {
-    console.log("Creating group component");
-    Shelly.call("Virtual.Add", {
-      type: "group",
-      id: compId.group,
-      config: {
-        name: config.groupName,
-        components: state.isShortageLead
-          ? ["text:" + compId.status]
-          : ["number:" + compId.highSocThreshold, "text:" + compId.status]
-      }
-    });
-  } else {
-    logDebug("Group component exists");
-  }
-
   // Wait for components to initialize
   Timer.set(2000, false, function() {
     finishSetup();
@@ -324,19 +273,7 @@ function finishSetup() {
 
   // Get component handles
   try {
-    // The shortage source reads no threshold component even if one exists on the device:
-    // the numbers live in this file, in one deployment, and nowhere else.
-    handles.highSocThreshold = state.isShortageLead
-      ? null
-      : Virtual.getHandle("number:" + compId.highSocThreshold);
     handles.status = Virtual.getHandle("text:" + compId.status);
-
-    // Load high threshold value
-    if (handles.highSocThreshold && handles.highSocThreshold.getValue() !== undefined) {
-      state.highSocThreshold = parseFloat(handles.highSocThreshold.getValue());
-      state.lowSocThreshold = lowThresholdFor(state.highSocThreshold);
-      logDebug("Loaded high SOC threshold: " + state.highSocThreshold + "% (low: " + state.lowSocThreshold + "%)");
-    }
   } catch (e) {
     console.log("Error getting component handles: " + e.message);
   }
@@ -351,11 +288,11 @@ function finishSetup() {
   startMonitoring();
 
   console.log("=== SOC Relay Controller Configuration ===");
-  console.log("Role: " + (state.isShortageLead ? config.shortageLead.name + " (determines shortage)" : "dump load"));
-  console.log("Device is lead relay: " + state.isLeadRelay);
+  console.log("Device: " + state.deviceName +
+             (state.isShortageLead ? " (determines shortage)" : " (dump load)") +
+             (state.isLeadRelay ? ", lead relay" : ""));
   console.log("High SOC Threshold: " + state.highSocThreshold + "%");
-  console.log("Low SOC Threshold: " + state.lowSocThreshold + "%" +
-             (config.soc.lowThreshold !== null ? "" : " (auto-calculated)"));
+  console.log("Low SOC Threshold: " + state.lowSocThreshold + "%");
   console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
   console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W" +
              (contributesToInverterOverload() ? "" : " (no overload role)"));
@@ -399,13 +336,19 @@ function determineDeviceIdentity(callback) {
       }
 
       logDebug("Device ID: " + result.id);
-      applyRoleForDevice(result.id);
-      state.isLeadRelay = (result.id.indexOf(config.leadRelay.deviceId) >= 0);
+
+      if (!applySettingsForDevice(result.id)) {
+        // Not a deployment mistake this script can recover from by waiting, so say so
+        // once and leave every relay in the unscripted behaviour its configuration gives.
+        console.log("Device " + result.id + " is not in the relay table - doing nothing");
+        return;
+      }
+
       assignLeadRelayTopic();
       state.identityKnown = true;
 
       if (state.isShortageLead) {
-        console.log("This device determines shortage - " + config.shortageLead.name);
+        console.log("This device determines shortage - " + state.deviceName);
       } else if (state.isLeadRelay) {
         console.log("This device IS the lead relay - will use local input");
       } else {
@@ -420,19 +363,6 @@ function determineDeviceIdentity(callback) {
 // ===== Event handlers =====
 function setupEventHandlers() {
   logDebug("Setting up event handlers");
-
-  // High SOC threshold changes
-  if (handles.highSocThreshold) {
-    try {
-      handles.highSocThreshold.on("change", function(ev_info) {
-        state.highSocThreshold = parseFloat(ev_info.value || state.highSocThreshold);
-        state.lowSocThreshold = lowThresholdFor(state.highSocThreshold);
-        updateStatus("SOC thresholds updated: On=" + state.highSocThreshold + "%, Off=" + state.lowSocThreshold + "%");
-      });
-    } catch (e) {
-      console.log("Error setting up threshold handler: " + e.message);
-    }
-  }
 
   // Watch for switch and input events
   Shelly.addEventHandler(function(event) {
@@ -976,11 +906,7 @@ function initializeVirtualComponents() {
   logDebug("Initializing virtual components");
 
   let compId = config.virtualComponents;
-  let keys = [
-    "number:" + compId.highSocThreshold,
-    "text:" + compId.status,
-    "group:" + compId.group
-  ];
+  let keys = ["text:" + compId.status];
 
   Shelly.call(
     "Shelly.GetComponents",
