@@ -293,9 +293,18 @@ Output ON + Voltage ≥ 200V + Power ≤ 5W = Thermal cutout detected
 Most controllers use intended/actual state tracking to avoid RPC callback re-entrancy when event handlers and RPC responses interact simultaneously.
 
 ### MQTT Keepalive
-Scripts that connect to Victron Cerbo GX send periodic keepalive messages:
-- Initial keepalive on connect
-- Subsequent keepalives every 30 seconds with "suppress-republish"
+The Cerbo GX publishes nothing until a value changes, so scripts ask it to republish
+everything:
+- An empty-payload keepalive on connect, sent from a later turn of the script's main loop
+  than the subscriptions. `MQTT.subscribe` is only acted on once the script yields, so a
+  request made in the same breath is answered before anything is listening. The length of
+  the delay is immaterial — a millisecond would do.
+- Every 30 seconds after that with `suppress-republish`, *unless* a rarely-changing value
+  the controller gates on has still not arrived, in which case it keeps asking for the full
+  republish. `vebus/276/State` changes when a generator runs, months apart, and the boiler
+  input when the boiler starts or stops firing, so neither has anything to publish between
+  transitions and both are only ever seen in a burst; everything else changes every few
+  seconds and arrives on its own.
 
 ### Virtual Components
 Scripts create virtual components for:

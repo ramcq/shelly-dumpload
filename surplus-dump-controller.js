@@ -85,6 +85,12 @@ let config = {
   // Timing settings
   checkInterval: 5 * 1000,    // 5 seconds in milliseconds
 
+  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
+  // main loop, so a republish asked for in the same breath is answered before anything is
+  // listening. The length hardly matters - a millisecond would do - only that it lands on
+  // a later turn of the loop.
+  initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
+
   // How long to wait for every remote stage to report its status before controlling
   // anyway. Covers a stage that is idle and therefore silent, and a broker reconnect,
   // which clears the received flags.
@@ -118,6 +124,7 @@ let state = {
   evChargerMode: 0,          // 0=Manual, 1=Auto, 2=Scheduled
   batterySOC: 0,             // Battery state of charge (%)
   vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting)
+  vebusReceived: false,      // Whether that was published rather than assumed
   inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Calculated values
@@ -228,7 +235,11 @@ function updateStatus(event) {
   let dcHydroPart = state.dcHydroPower > 0 ? " DC Hydro:" + state.dcHydroPower.toFixed(0) + "W" : "";
   let availPart = " Avail:" + state.availablePower.toFixed(0) + "W";
 
-  let vePart = " VE:" + getVebusStateString(state.vebusState);
+  // "?" is not "Off": both suppress every stage, but one is the inverter and the other is
+  // this controller never having been told, which would otherwise be diagnosed as a fault
+  // on the inverter.
+  let vePart = " VE:" +
+    (state.vebusReceived ? getVebusStateString(state.vebusState) : "?");
 
   let evPart = "";
   if (state.evChargerStatus === 2) {
@@ -451,6 +462,13 @@ function processMqttMessage(topic, message) {
     if (relativeTopic === config.victron.vebusState) {
       state.vebusState = parseInt(payload.value);
       logDebug("VE.Bus state updated: " + state.vebusState + " (" + getVebusStateString(state.vebusState) + ")");
+
+      // Worth a console line rather than a debug one: until this arrives every stage is
+      // suppressed, so this is the moment the controller becomes able to dump at all.
+      if (!state.vebusReceived) {
+        state.vebusReceived = true;
+        console.log("VE.Bus state received: " + getVebusStateString(state.vebusState));
+      }
     }
 
     // Update inverter output - with fast-path emergency suppression
@@ -512,20 +530,25 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + switchTopic);
   }
 
-  // Wait 2 seconds for subscriptions to become active on broker before sending keepalive
-  // This ensures the Cerbo GX will deliver retained messages to our active subscriptions
-  logDebug("Waiting for MQTT subscriptions to become active");
-  Timer.set(2000, false, function() {
-    // Send initial keepalive
+  // Ask for a full republish, but from a later turn of the main loop than the subscriptions
+  // above - see config.initialKeepaliveDelay.
+  Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
+  });
 
-    // Setup periodic keepalive (every 30 seconds)
-    if (state.keepaliveTimer) {
-      Timer.clear(state.keepaliveTimer);
-    }
-    state.keepaliveTimer = Timer.set(30000, true, function() {
-      sendKeepalive(true);
-    });
+  // Setup periodic keepalive (every 30 seconds).
+  //
+  // Keep asking for a republish until the VE.Bus state has actually been seen, in case the
+  // yield above was not enough. The broker publishes nothing until a value changes, and
+  // this one changes only when a generator runs - months apart - so it is only ever seen in
+  // a republish. Everything else in the topic set changes every few seconds and so arrives
+  // regardless, which is what makes the miss invisible: the one path the Priority 1 gate
+  // rests on is the one that fails to arrive.
+  if (state.keepaliveTimer) {
+    Timer.clear(state.keepaliveTimer);
+  }
+  state.keepaliveTimer = Timer.set(30000, true, function() {
+    sendKeepalive(state.vebusReceived);
   });
 }
 
@@ -563,6 +586,7 @@ function resetMqttData() {
   state.evChargerMode = 0;
   state.batterySOC = 0;
   state.vebusState = 0; // Off
+  state.vebusReceived = false;
   state.inverterOutput = 0;
 
   for (let i = 0; i < state.remoteSwitches.length; i++) {
@@ -1026,9 +1050,12 @@ function checkSystemState() {
   // Only allow dumps when inverter is in Inverting mode (state 9)
   // Covers: Off, Fault, Passthru (generator), Power Assist, Bulk/Absorption/Float (charging)
   if (state.vebusState !== 9) {
-    logDebug("VE.Bus not inverting (" + getVebusStateString(state.vebusState) + "), suppressing all dump loads");
-    suppressAllLoads("VE.Bus " + getVebusStateString(state.vebusState));
-    updateStatus("VE " + getVebusStateString(state.vebusState));
+    // Not yet heard from suppresses exactly as Off does, but says so differently: the
+    // republish retry above is what ends that, and it is not an inverter fault.
+    let veName = state.vebusReceived ? getVebusStateString(state.vebusState) : "Unknown";
+    logDebug("VE.Bus not inverting (" + veName + "), suppressing all dump loads");
+    suppressAllLoads("VE.Bus " + veName);
+    updateStatus("VE " + veName);
     return;
   }
 

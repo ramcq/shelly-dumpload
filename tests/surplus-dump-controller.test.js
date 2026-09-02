@@ -8,7 +8,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load } = require("./harness.js");
+const { load, captureLog } = require("./harness.js");
 
 const SCRIPT = "surplus-dump-controller.js";
 const HEATER = 2690; // W, nominal per immersion
@@ -213,4 +213,76 @@ test("a broker reconnect re-arms the bounded wait", () => {
   mod.state.remoteSwitches.forEach((s) => {
     assert.strictEqual(s.statusReceived, false);
   });
+});
+
+// ===== Seeding the VE.Bus state =====
+
+// The broker publishes nothing until a value changes, and this one changes only when a
+// generator runs - months apart - so it is only ever seen in the burst a republish
+// produces. Everything else in the topic set changes every few seconds and arrives
+// regardless, which is what makes the miss invisible: measured on the live broker over 70
+// seconds, `vebus/276/State` did not arrive once. Miss it and Priority 1 suppresses every
+// stage until the next generator run.
+const PORTAL = "c0847dc9a794";
+const INVERTING = 9;
+
+function victron(mod, key, value) {
+  mod.processMqttMessage("N/" + PORTAL + "/" + mod.config.victron[key],
+    JSON.stringify({ value: value }));
+}
+
+test("the first republish request waits for a turn of the main loop", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+
+  assert.deepStrictEqual(published, [],
+    "a request sent in the same breath as MQTT.subscribe is answered before anything is " +
+    "listening");
+
+  const delayed = timers.filter((t) => t.repeat === false).pop();
+  assert.strictEqual(delayed.ms, mod.config.initialKeepaliveDelay);
+
+  delayed.fn();
+  assert.strictEqual(published[0].payload, "",
+    "an empty payload is what asks the broker to republish everything");
+});
+
+test("keepalives keep asking for a republish until VE.Bus has been seen", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  assert.ok(keepalive, "no periodic keepalive was scheduled");
+
+  published.length = 0;
+  keepalive.fn();
+  assert.strictEqual(published[0].payload, "",
+    "one lost burst would suppress every stage until the next generator run");
+
+  victron(mod, "vebusState", INVERTING);
+  published.length = 0;
+  keepalive.fn();
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
+    "once seen, stop asking the whole system to republish every 30 seconds");
+});
+
+test("a broker drop makes the VE.Bus state unknown again", () => {
+  const { mod } = loadController();
+  victron(mod, "vebusState", INVERTING);
+  assert.strictEqual(mod.state.vebusReceived, true);
+
+  mod.resetMqttData();
+
+  assert.strictEqual(mod.state.vebusReceived, false);
+  assert.strictEqual(mod.state.vebusState, 0);
+});
+
+test("the status line tells an unheard VE.Bus state from Off", () => {
+  const { mod } = loadController();
+
+  assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("VE:?") >= 0,
+    "never having been told reads as an inverter that is off, and gets diagnosed as one");
+
+  victron(mod, "vebusState", INVERTING);
+  assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("VE:Inverting") >= 0);
 });
