@@ -43,11 +43,19 @@ let config = {
   //
   // `low` is derived as `high - 1` unless stated: a wide band has to be stated outright.
   // A device not listed here runs nothing, which is what makes a misdirected deploy safe.
+  //
+  // `pollOffset` is where this relay's poll sits in the check interval, so that a lock
+  // closing does not release every immersion in the same instant. It is grouped by tank
+  // rather than by device, because that is what the loads are: the two left elements share
+  // a slot, the top one sitting in the stratified layer where it almost never calls, so the
+  // pair is one 2.7 kW load in practice. Absent means 0, which is what the shortage lead
+  // wants - it has no dump load to space out, and its relay is the signal the others wait
+  // on.
   relays: [
-    { id: "543204558c6c", name: "DHW Left Top",     high: 96 },
-    { id: "543204558fc8", name: "DHW Left Bottom",  high: 94, leadRelay: true },
-    { id: "dcda0ce04fb0", name: "DHW Right",        high: 95 },
-    { id: "dcda0ce06e98", name: "DHW Annex",        high: 96 },
+    { id: "543204558c6c", name: "DHW Left Top",     high: 96, pollOffset: 0 },
+    { id: "543204558fc8", name: "DHW Left Bottom",  high: 94, leadRelay: true, pollOffset: 0 },
+    { id: "dcda0ce04fb0", name: "DHW Right",        high: 95, pollOffset: 10 * 1000 },
+    { id: "dcda0ce06e98", name: "DHW Annex",        high: 96, pollOffset: 20 * 1000 },
     // Not a dump load and has no SOC band of its own: its relay is shortage, expressed.
     { id: "d885ac0a3668", name: "Heat Pump Enable", shortageLead: true }
   ],
@@ -152,6 +160,7 @@ let state = {
   deviceName: "",
   highSocThreshold: 0,
   lowSocThreshold: 0,
+  pollOffset: 0,             // Where this relay's poll sits in the check interval
 
   // Timer
   timerId: null
@@ -204,6 +213,8 @@ function applySettingsForDevice(deviceId) {
       state.highSocThreshold = relay.high;
       state.lowSocThreshold = relay.low !== undefined ? relay.low : relay.high - 1;
     }
+
+    state.pollOffset = relay.pollOffset !== undefined ? relay.pollOffset : 0;
 
     if (state.isShortageLead) {
       // An enable, not a dump load: it runs regardless of surplus, has nothing to shed on
@@ -616,7 +627,16 @@ function processMqttMessage(topic, message) {
         }
 
         updateStatus("Heat pump lock changed");
-        checkSystemState();
+
+        // Shedding is the safety direction and happens on the edge. Releasing waits for
+        // this relay's next poll, which is what spaces the four immersions out: .209's
+        // message reaches all of them in the same instant, and four relays deciding on one
+        // inverter reading is four relays deciding blind to each other. Nothing is queued
+        // to make that happen - the poll re-reads the whole ladder, so a lock that opens
+        // again in the meantime is simply a shed, with no pending enable to cancel.
+        if (!state.lockIsClosed) {
+          checkSystemState();
+        }
       }
       return;
     }
@@ -1114,17 +1134,30 @@ function startMonitoring() {
   // Clear existing timer if it exists
   if (state.timerId !== null) {
     Timer.clear(state.timerId);
+    state.timerId = null;
     logDebug("Cleared existing timer");
   }
 
-  // Start new timer
+  // The first check is never staggered. A restart can find this relay closed with the lock
+  // open, and a shed must not wait on an offset whose only job is to space out enabling.
+  checkStatus();
+
+  // The loop itself starts late, which puts this relay's poll at its own point in the
+  // window for as long as the script runs. See config.relays.
+  if (state.pollOffset > 0) {
+    logDebug("Poll offset " + (state.pollOffset / 1000) + "s before the loop starts");
+    Timer.set(state.pollOffset, false, startPolling);
+    return;
+  }
+
+  startPolling();
+}
+
+function startPolling() {
   state.timerId = Timer.set(config.checkInterval, true, function() {
     logDebug("Timer triggered check");
     checkStatus();
   });
-
-  // Initial check immediately
-  checkStatus();
 }
 
 // ===== Initialization =====

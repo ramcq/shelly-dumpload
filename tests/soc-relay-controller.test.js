@@ -17,6 +17,7 @@ const DUMP = "soc-relay-controller.js";
 const HEAT_PUMP_ENABLE = "shelly1minig3-d885ac0a3668"; // .209, no band of its own
 const LEAD_RELAY = "shelly1pmg3-543204558fc8"; // .90, Left Bottom, 94/93, time switch
 const LEFT_TOP = "shelly1pmg3-543204558c6c"; // .88, 96/95, a plain follower
+const ANNEX = "shelly1pmg3-dcda0ce06e98"; // .100, 96/95, the last tank in the poll window
 const HP_LOCK = "shelly1minig3-d885ac0a3668/status/switch:0";
 const PORTAL = "c0847dc9a794";
 
@@ -607,7 +608,8 @@ test("an open lock sheds the immersion, time switch and all", () => {
   lock(mod, false);
 
   assert.deepStrictEqual(switchCommands(calls), [false],
-    "2.7 kW of hot water is not something to make on a flat battery");
+    "2.7 kW of hot water is not something to make on a flat battery, and shedding is the " +
+    "safety direction: it happens on the edge, without waiting for a poll");
 });
 
 // Deliberate, and a change from today: the VE.Bus gate sits below the time switch and
@@ -668,7 +670,10 @@ test("an immersion keeps its own VE.Bus gate when no lock answers", () => {
     "a dump load must be safe with nothing published by .209 at all");
 });
 
-test("closing the lock gives the time switch back", () => {
+test("closing the lock gives the time switch back on the next poll", () => {
+  // .209's message reaches all four immersions in the same instant, so coming back on the
+  // edge is four relays deciding against one inverter reading, each blind to the others.
+  // The release waits for this relay's own poll instead; the shed above does not.
   const { mod, calls } = loadImmersion();
   settle(mod, false);
   mod.state.leadInputActive = true;
@@ -678,8 +683,30 @@ test("closing the lock gives the time switch back", () => {
   lock(mod, false);
   lock(mod, true);
 
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the edge that unlocks the heat pump must not close four relays at once");
+
+  mod.checkSystemState();
+
   assert.deepStrictEqual(switchCommands(calls), [true],
-    "the immersions come back on the same edge that unlocks the heat pump");
+    "the first poll after the edge has to give the time switch back");
+});
+
+test("nothing is left pending, so a lock that reopens is just a shed", () => {
+  // The poll re-reads the whole ladder rather than acting on an intention formed earlier,
+  // which is why the release needs no cancellation path.
+  const { mod, calls } = loadImmersion();
+  settle(mod, false);
+  mod.state.leadInputActive = true;
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "batterySOC", 50);
+
+  lock(mod, true);  // released, waiting for its poll
+  lock(mod, false); // and short again before the poll came round
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "a queued enable closed a relay the lock had already locked again");
 });
 
 test("a lost broker does not close the lock", () => {
@@ -741,6 +768,54 @@ test("the shortage lead asks nobody anything", () => {
   timers.filter((t) => t.repeat === false).pop().fn();
 
   assert.deepStrictEqual(published.filter((pub) => pub.payload === "status_update"), []);
+});
+
+// ===== Spacing the release out =====
+
+test("the poll offsets separate the tanks, not the devices", () => {
+  // Left top and left bottom share a slot on purpose: the top element sits in the
+  // stratified layer and almost never calls, so the pair is one 2.7 kW load in practice.
+  // What has to be separated is left from right from annex.
+  const expected = {
+    "543204558c6c": 0,          // DHW Left Top
+    "543204558fc8": 0,          // DHW Left Bottom
+    "dcda0ce04fb0": 10 * 1000,  // DHW Right
+    "dcda0ce06e98": 20 * 1000   // DHW Annex
+  };
+
+  Object.keys(expected).forEach((id) => {
+    assert.strictEqual(loadRelay(id).mod.state.pollOffset, expected[id], id);
+  });
+
+  assert.strictEqual(loadShortageLead().mod.state.pollOffset, 0,
+    "the shortage lead has no dump load to space out, and everything else waits on it");
+});
+
+test("a staggered relay checks at once, then starts its loop late", () => {
+  const { mod, timers } = loadRelay(ANNEX);
+
+  mod.finishSetup();
+
+  const late = timers.filter((t) => t.repeat === false && t.ms === 20 * 1000);
+  assert.strictEqual(late.length, 1, "the annex did not hold its loop back");
+  assert.deepStrictEqual(timers.filter((t) => t.repeat === true), [],
+    "the loop started in phase with every other relay");
+
+  late[0].fn();
+
+  assert.strictEqual(
+    timers.filter((t) => t.repeat === true && t.ms === mod.config.checkInterval).length, 1,
+    "the loop never started");
+});
+
+test("an unstaggered relay starts its loop straight away", () => {
+  const { mod, timers } = loadImmersion();
+
+  mod.finishSetup();
+
+  assert.strictEqual(
+    timers.filter((t) => t.repeat === true && t.ms === mod.config.checkInterval).length, 1,
+    "a zero offset still delayed the loop");
 });
 
 // ===== The latch has one durable copy, and .209 keeps it =====

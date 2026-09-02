@@ -134,7 +134,7 @@ boolean and one subscription, and sheds while the lock is open. See
 - Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
 - Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
 - Shortage uses the same reading against the same threshold, but under `config.shortage.minGeneration`, which is never disabled; this gate is, for a relay that is not a dump load
-- Naturally self-staggers multiple dump loads *as SOC crosses their thresholds*: each load coming on reduces battery charging rate, and only enables when its own SOC threshold is met with sufficient generation. It does not stagger a release that finds every threshold already satisfied — see [CONTROLS.md](CONTROLS.md) on simultaneous release
+- Naturally self-staggers multiple dump loads *as SOC crosses their thresholds*: each load coming on reduces battery charging rate, and only enables when its own SOC threshold is met with sufficient generation. A release that finds every threshold already satisfied is spaced by `pollOffset` instead — see [CONTROLS.md](CONTROLS.md)
 - Turn-off is purely SOC-based and immediate — a hydro trip sheds the load at once
 - Configurable via `config.minGenerationPower`
 
@@ -311,6 +311,11 @@ Scripts use `Shelly.addEventHandler()` and `Shelly.addStatusHandler()` to react 
 no timers gives under five relay operations a day — decades inside the relay's rating — and
 SOC cannot chatter the way the old frequency signal could, because a load coming on bends the
 slope of an integral rather than cancelling the reading.
+
+`config.relays[].pollOffset` is not one. A dwell holds a decision that has already been
+taken; the offset only moves *when* each relay takes its own, so that a heat pump lock
+closing does not release every immersion against the same inverter reading. A lock opening
+still sheds on the edge. See [CONTROLS.md](CONTROLS.md).
 
 `surplus-dump-controller.js` keeps a symmetric **`minChangeTime`** (10 minutes) per stage for
 a different reason: its allocator needs each stage's state to stand still long enough to
