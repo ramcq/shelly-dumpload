@@ -401,12 +401,25 @@ The script also asserts `status_ntf` in the device's MQTT config. Every follower
 .209's published switch status and nothing else, so a device with status notifications off
 is a controller whose decision never leaves it.
 
+The Victron broker behaves the same way, and worse for a value that rarely changes: it
+publishes nothing until a value changes, and the one chance at the rest is the republish an
+empty-payload keepalive triggers. Subscriptions are not reliably live in time for the burst
+following the first keepalive, so a controller can start up and never see `vebus/276/State`
+— which changes only when a generator runs, months apart. Every other topic in the set
+changes every few seconds and arrives regardless, so this fails on exactly the one the gate
+depends on. So the first keepalive waits a second after subscribing, and the periodic one
+keeps asking for a republish until that state has been seen: the delay makes the ordinary
+case immediate, the retry keeps it correct when the delay is not enough. Observed on .209 on
+first deployment, 1 September 2026.
+
 Shelly status notifications are published on change and are **not** retained, so a script
 that follows another device sees nothing until that device next changes state. Every
-follower must therefore seed itself with an HTTP `Switch.GetStatus` against the device it
-follows at startup: .164 and the four DHW immersions against .209, and the DHW immersions
-against the lead relay's input. Without it, a controller restarting mid-shortage would
-assume no shortage until the next transition.
+follower must therefore ask rather than assume. Publishing `status_update` to the followed
+device's `<prefix>/command` topic makes it republish every component on `<prefix>/status/…`
+— the topics the follower already holds — so asking costs no extra subscription and no HTTP.
+The DHW immersions do this against the lead relay's input; .164 and .123 will do the same
+against whatever they come to follow. Without it, a controller restarting during a hot water
+window ignores the time switch until the clock next moves.
 
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under

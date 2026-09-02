@@ -323,8 +323,17 @@ anyway; otherwise one idle immersion holds every other load off. Commanding a st
 position it is already in is a no-op, so guessing wrong is cheap. The bound is re-armed on
 every broker reconnect, which clears the received flags.
 
-This is a floor, not a substitute for seeding: an HTTP `Switch.GetStatus` per device at
-startup would be better and is what the newer controllers are specified to do.
+This is a floor, not a substitute for asking. `soc-relay-controller.js` asks: a follower
+publishes `status_update` to the lead relay's command topic, which makes the lead republish
+every component on the topics the follower already subscribes to. That is the same trick as
+the Victron keepalive — subscribe first, then induce a redundant broadcast — and it costs no
+extra subscription, no HTTP and no reply topic. It needs only `enable_control`, which is on
+by default.
+
+Asked on connect, after the subscriptions land, and again on every 30-second poll until an
+input status has actually arrived, since the request is as losable as the answer. A broker
+drop clears the flag: a change made while the follower was away is not repeated, so the
+reading is unknown afterwards rather than merely old.
 
 ---
 
