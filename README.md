@@ -323,8 +323,14 @@ slope of an integral rather than cancelling the reading.
 
 `config.relays[].pollOffset` is not one. A dwell holds a decision that has already been
 taken; the offset only moves *when* each relay takes its own, so that a heat pump lock
-closing does not release every immersion against the same inverter reading. A lock opening
-still sheds on the edge. See [CONTROLS.md](CONTROLS.md).
+closing — or the manual time switch closing — does not enable every immersion against the
+same inverter reading. Both of those shed on the edge, unchanged: only enabling waits. The
+lead relay is never held back, since it answers the time switch in hardware.
+
+The slot is anchored to wall clock — a relay polls when `unixtime` modulo the interval comes
+round to its offset — so the offsets separate the relays however far apart their scripts
+started. A device whose clock has never synchronised falls back to phasing from its own
+start. See [CONTROLS.md](CONTROLS.md).
 
 `surplus-dump-controller.js` keeps a symmetric **`minChangeTime`** (10 minutes) per stage for
 a different reason: its allocator needs each stage's state to stand still long enough to
