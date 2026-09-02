@@ -277,6 +277,94 @@ test("a broker drop makes the VE.Bus state unknown again", () => {
   assert.strictEqual(mod.state.vebusState, 0);
 });
 
+// ===== Asking the stages to report =====
+
+// A PM channel cannot stay quiet for long - measured on the live broker, an immersion at
+// thermal cutout republished its switch status every 20-30 seconds without switching - but
+// a stage that is off may say nothing at all, and until every stage has reported this
+// controller touches none of them.
+function statusUpdates(published) {
+  return published.filter((p) => p.payload === "status_update").map((p) => p.topic);
+}
+
+function receive(mod, deviceId, switchId, on) {
+  mod.processMqttMessage(deviceId + "/status/switch:" + switchId,
+    JSON.stringify({ output: on }));
+}
+
+test("the ask waits for the main loop, then goes to each device's command topic", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+
+  assert.deepStrictEqual(statusUpdates(published), [],
+    "a request sent in the same breath as the subscription loses the answer it asks for");
+
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.deepStrictEqual(statusUpdates(published).sort(),
+    [PRO1PM + "/command", PRO2PM + "/command"],
+    "the controller waited out statusSeedTimeout instead of asking");
+});
+
+test("one ask per device, not per stage", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.strictEqual(statusUpdates(published).filter((t) => t === PRO2PM + "/command").length,
+    1, "immersions 1 and 2 share a device, and one republish carries both channels");
+});
+
+test("a device is still asked while one of its two stages is unheard", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+  receive(mod, PRO2PM, 0, true);
+
+  published.length = 0;
+  timers.filter((t) => t.repeat === true).pop().fn();
+
+  assert.ok(statusUpdates(published).includes(PRO2PM + "/command"),
+    "immersion 2 would stay unheard because immersion 1 had answered");
+});
+
+test("the controller keeps asking until every stage answers", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+  const periodic = timers.filter((t) => t.repeat === true).pop();
+
+  published.length = 0;
+  periodic.fn();
+  assert.strictEqual(statusUpdates(published).length, 2,
+    "one lost request would leave the whole controller waiting out its bounded wait");
+
+  receive(mod, PRO2PM, 0, true);
+  receive(mod, PRO2PM, 1, false);
+  receive(mod, PRO1PM, 0, false);
+
+  published.length = 0;
+  periodic.fn();
+  assert.deepStrictEqual(statusUpdates(published), [],
+    "once answered, stop asking every device to republish every 30 seconds");
+});
+
+// A stage may have been switched by hand while the broker was away, and nothing will
+// repeat it: the reading afterwards is unknown, not merely old.
+test("a reconnect asks every device again", () => {
+  const { mod, published, timers } = loadController();
+  mod.handleMqttConnected();
+  receive(mod, PRO2PM, 0, true);
+  receive(mod, PRO2PM, 1, true);
+  receive(mod, PRO1PM, 0, true);
+
+  mod.resetMqttData();
+  published.length = 0;
+  mod.handleMqttConnected();
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.strictEqual(statusUpdates(published).length, 2,
+    "a controller that kept its answers would trust a stage that had moved since");
+});
+
 // ===== The device's own MQTT config =====
 
 // Connected is the ordinary case: the device's MQTT client is up long before the script

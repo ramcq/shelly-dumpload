@@ -518,14 +518,17 @@ the boiler cold: the tank temperatures arrived four times each and neither of th
 arrived at all. Observed on .209 on first deployment, 1 September 2026, which read
 VE Off for three minutes while everything else streamed correctly.
 
-Shelly status notifications are published on change and are **not** retained, so a script
-that follows another device sees nothing until that device next changes state. Every
-follower must therefore ask rather than assume. Publishing `status_update` to the followed
-device's `<prefix>/command` topic makes it republish every component on `<prefix>/status/…`
-— the topics the follower already holds — so asking costs no extra subscription and no HTTP.
-The DHW immersions do this against the lead relay's input; .164 and .123 will do the same
-against whatever they come to follow. Without it, a controller restarting during a hot water
-window ignores the time switch until the clock next moves.
+Shelly status notifications are published on change and are **not** retained, and how long
+the silence lasts is a property of the signal rather than the device: a PM channel
+republishes every 20–30 seconds whatever it is doing, because its power and energy readings
+drift, while a component with no telemetry — a relay's `input:0` — says nothing at all until
+someone moves it, and a time switch can sit still for hours. So a follower asks rather than
+assumes. Publishing `status_update` to the followed device's `<prefix>/command` topic makes
+it republish every component on `<prefix>/status/…` — the topics the follower already holds
+— so asking costs no extra subscription and no HTTP. The DHW immersions do this against the
+lead relay's input and the surplus controller against each of its remote stages; .164 and
+.123 will do the same against whatever they come to follow. Without it, a controller
+restarting during a hot water window ignores the time switch until the clock next moves.
 
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under

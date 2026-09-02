@@ -92,8 +92,8 @@ let config = {
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
 
   // How long to wait for every remote stage to report its status before controlling
-  // anyway. Covers a stage that is idle and therefore silent, and a broker reconnect,
-  // which clears the received flags.
+  // anyway. Every stage is asked to republish on connect, so this is the floor under a
+  // lost request rather than the way status normally arrives.
   statusSeedTimeout: 90 * 1000,
 
   // Virtual component IDs (minimal to avoid MQTT spam)
@@ -534,6 +534,7 @@ function setupMqttSubscriptionsAndKeepalive() {
   // above - see config.initialKeepaliveDelay.
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
+    requestRemoteStatus();
   });
 
   // Setup periodic keepalive (every 30 seconds).
@@ -549,7 +550,39 @@ function setupMqttSubscriptionsAndKeepalive() {
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
     sendKeepalive(state.vebusReceived);
+    requestRemoteStatus();
   });
+}
+
+// Shelly publishes status on change and does not retain it, so nothing arrives from a stage
+// that has not moved since this script started. A PM channel cannot stay quiet for long -
+// its power, voltage and energy readings drift, and one republishes every 20-30 seconds
+// whether or not it has switched - but a stage that is off may say nothing at all, and until
+// every stage has reported, this controller will not touch any of them.
+//
+// So ask, rather than wait it out: `status_update` on a device's command topic makes it
+// republish every component on `<prefix>/status/…`, which the wildcard subscription above
+// already covers. No extra subscription, no HTTP, no reply topic, and it needs only
+// `enable_control`, which is on by default. Same shape as the keepalive, and for the same
+// reason: ask on connect, then keep asking until the answer arrives, since the request is
+// as losable as the answer.
+//
+// One ask per device, not per stage: immersions 1 and 2 share a Pro 2PM, and one republish
+// carries both channels.
+function requestRemoteStatus() {
+  let asked = [];
+
+  for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
+    let sw = config.remoteSwitches.switches[i];
+
+    if (state.remoteSwitches[i].statusReceived || arrayContains(asked, sw.deviceId)) {
+      continue;
+    }
+    asked.push(sw.deviceId);
+
+    MQTT.publish(sw.deviceId + "/command", "status_update", 1, false);
+    logDebug("Asked " + sw.deviceId + " to republish its status");
+  }
 }
 
 function handleMqttConnected() {
@@ -1043,11 +1076,12 @@ function checkSystemState() {
     }
 
     if (!allSwitchStatusReceived) {
-      // Shelly publishes switch status on change and does not retain it, so a stage
-      // that has not switched since we connected may not announce itself for a long
-      // time. Waiting indefinitely would let one idle stage hold every other load off,
-      // so bound the wait and then treat the silent stages as off. Commanding a stage
-      // that is already in the desired position is a no-op, so guessing wrong is cheap.
+      // Every stage is asked to republish on connect, and an energised one announces
+      // itself within half a minute regardless, so what is left here is a lost request to
+      // a stage that is off and therefore silent. Waiting indefinitely on it would let one
+      // idle stage hold every other load off, so bound the wait and then treat the silent
+      // stages as off. Commanding a stage that is already in the desired position is a
+      // no-op, so guessing wrong is cheap.
       if (state.firstIncompleteCheck === 0) {
         state.firstIncompleteCheck = Date.now();
       }

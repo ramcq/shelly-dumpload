@@ -120,3 +120,13 @@ failure mode but the designed minimum, arrived at by the follower keeping every 
 its own. An unreachable Heat Pump Enable costs the immersions the shortage shed and nothing
 else, which is the immersion floor.
 _Avoid_: Fallback, default, degraded mode
+
+**Self-announcing**:
+A signal whose value keeps arriving whether or not anything has changed, because the reading
+itself drifts — any Shelly PM channel, which republishes every 20–30 seconds on power and
+energy alone, and SOC, generation, inverter output and tank temperature on the Victron side.
+A follower may wait for one of these. Its opposite is a **silent** signal, which has no
+drift to publish and so says nothing between changes: a relay's input, the VE.Bus state, the
+boiler input. A follower must ask for those, because the wait has no end. A property of the
+signal, not of the device or the transport — one device commonly carries both.
+_Avoid_: Chatty, noisy, retained

@@ -343,33 +343,34 @@ Two ways to stay under it, both used by `surplus-dump-controller.js`:
   on that device, so stages sharing a Shelly cost one subscription between them.
 
 ### Seeding State From Other Devices
-Shelly publishes status on change and does not retain it (see [POWER.md](POWER.md)), so a
-controller that follows another device starts blind and a device that has not switched
-recently may stay silent for a long time.
+Shelly publishes status on change and does not retain it, so a controller that follows
+another device starts blind. How long it stays blind is a property of the signal, not the
+device: a PM channel cannot stay quiet — its power, voltage and energy readings drift, and
+one republishes every 20–30 seconds whether or not it has switched — while a component with
+no telemetry, such as a relay's `input:0`, says nothing until someone moves it, and a time
+switch can sit still for hours.
 
-`surplus-dump-controller.js` waits for every remote stage to report before it controls
-anything, so that it does not disturb loads already running — but that wait is bounded by
-`statusSeedTimeout`. Past it, silent stages are assumed off and the rest are controlled
-anyway; otherwise one idle immersion holds every other load off. Commanding a stage into the
-position it is already in is a no-op, so guessing wrong is cheap. The bound is re-armed on
-every broker reconnect, which clears the received flags.
+So controllers ask rather than wait. Publishing `status_update` to a device's
+`<prefix>/command` topic makes it republish every component on `<prefix>/status/…`, the
+topics the follower already subscribes to: no extra subscription, no HTTP and no reply
+topic, and it needs only `enable_control`, which is on by default. Asked once the
+subscriptions are in — from a later turn of the main loop, as with the keepalive — and again
+on every 30-second keepalive until the answer arrives, since the request is as losable as
+the answer. `soc-relay-controller.js` asks the lead relay for its time switch input;
+`surplus-dump-controller.js` asks each remote device for its stages' switch status, one ask
+per device rather than per stage.
 
-This is a floor, not a substitute for asking. `soc-relay-controller.js` asks: a follower
-publishes `status_update` to the lead relay's command topic, which makes the lead republish
-every component on the topics the follower already subscribes to. That is the same trick as
-the Victron keepalive — subscribe first, then induce a redundant broadcast — and it costs no
-extra subscription, no HTTP and no reply topic. It needs only `enable_control`, which is on
-by default.
+Surplus keeps a bounded wait behind that ask, `statusSeedTimeout`: it will not disturb loads
+already running before every stage has reported, but past the bound the silent stages are
+assumed off and the rest controlled anyway, or one idle immersion holds every other load
+off. Commanding a stage into the position it is already in is a no-op, so guessing wrong is
+cheap.
 
-Asked on connect, after the subscriptions land, and again on every 30-second poll until the
-status has actually arrived, since the request is as losable as the answer. The ask on
-connect is unconditional: a value already held may have changed while the broker was away,
-and neither device will repeat it.
-
-What a drop does to the flag differs by what the value is for. The lead relay's input flag is
-cleared, so the reading is unknown afterwards rather than merely old. The heat pump lock's is
-kept, because an absent lock sheds nothing: forgetting it would shed four immersions on a
-broker blip, and silence is not .209 saying the battery recovered.
+What a drop does to a flag differs by what the value is for. Clearing it makes the reading
+unknown afterwards rather than merely old, which is right for anything that may have moved
+while the broker was away — a time switch, a stage someone reached for by hand. The heat
+pump lock's flag is kept instead, because an absent lock sheds nothing: forgetting it would
+shed four immersions on a broker blip, and silence is not .209 saying the battery recovered.
 
 ---
 
