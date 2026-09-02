@@ -81,9 +81,9 @@ contacts are the running state, so the heat pump is locked by the *absence* of a
 _Avoid_: Disable, switch off, stop the heat pump
 
 **DHW demand**:
-A request for hot water: the time clock calling, whether that is the physical clock or a
-window synthesised in its place. A reason to want heat moved, and therefore a reason to
-release the biomass.
+A request for hot water: the time clock calling. A reason to want heat moved, and therefore
+a reason to release the biomass — which a shortage DHW window is not, because a window is
+made of heat that is already there.
 _Avoid_: DHW call, hot water request
 
 **DHW enable**:

@@ -48,6 +48,15 @@ const EXPORTED = [
   "seedLatchFromRelay",
   "determineDeviceIdentity",
   "finishSetup",
+  // heating-relay-controller
+  "syncedNow",
+  "releaseReason",
+  "shortageRelease",
+  "exerciseDue",
+  "updateExerciseRun",
+  "recordIgnition",
+  "readLastIgnition",
+  "outstandingReadings",
   // common
   "setupMqttSubscriptionsAndKeepalive",
   "processMqttMessage",
@@ -84,8 +93,11 @@ function load(scriptName, deviceId) {
   const stubs = {
     Shelly: {
       // Never calls back, so a script's own init() stalls here rather than
-      // starting timers. The record is what a test asserts a controller did.
-      call: function (method, params) { calls.push({ method, params }); },
+      // starting timers. The record is what a test asserts a controller did. The
+      // callback is kept rather than dropped, so a test that needs an answer -
+      // a KVS read, where "no such key" is itself the interesting case - can
+      // invoke it as the device would.
+      call: function (method, params, cb) { calls.push({ method, params, cb }); },
       addStatusHandler: function () {},
       addEventHandler: function () {},
       getComponentStatus: function () { return null; },

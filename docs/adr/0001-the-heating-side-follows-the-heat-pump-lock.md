@@ -62,7 +62,8 @@ where an uptime reading would have read the default as a released heat pump.
   in hardware, `.123` still passes the time clock through in hardware.
 - A lock never heard from sheds nothing, so an undeployed or unreachable .209 costs the
   immersion floor and nothing else.
-- `.164` infers which term is short from the lock plus its own VE.Bus reading, rather than
-  reading the terms directly. It needs that only to tell a transient lock from a battery one
-  for its 30-minute dwell.
+- `.164` reads VE.Bus itself and the lock second, in that order. Not an inference: .209 opens
+  the lock *because* VE.Bus left Inverting, so answering VE.Bus first leaves the lock exactly
+  one thing left to mean — the battery — and the 30-minute wait for everything else is timed
+  against a reading `.164` watches itself rather than against when `.209` changed its mind.
 - The 30, 90 and 500 W numbers exist in exactly one deployment, on one device.
