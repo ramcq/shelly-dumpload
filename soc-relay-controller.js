@@ -24,7 +24,8 @@ let config = {
   // Lead relay (has manual time switch connected to its input)
   leadRelay: {
     deviceId: "543204558fc8", // Device ID of the lead relay
-    inputTopic: "shelly1pmg3-543204558fc8/status/input:0" // MQTT topic for lead relay input
+    inputTopic: "shelly1pmg3-543204558fc8/status/input:0", // MQTT topic for lead relay input
+    commandTopic: "shelly1pmg3-543204558fc8/command"       // where to ask it to republish
   },
 
   // SOC control settings
@@ -120,6 +121,7 @@ let state = {
 
   // Lead relay state
   leadInputActive: false,    // State of the lead relay's input (manual time switch)
+  leadInputReceived: false,  // Whether that state was ever published rather than assumed
 
   // Control settings
   highSocThreshold: config.soc.highThreshold,
@@ -507,6 +509,7 @@ function processMqttMessage(topic, message) {
       if (payload.state !== undefined) {
         let wasActive = state.leadInputActive;
         state.leadInputActive = Boolean(payload.state);
+        state.leadInputReceived = true;
 
         // Log to console on state change (this is a priority control signal)
         if (wasActive !== state.leadInputActive) {
@@ -600,6 +603,7 @@ function handleMqttConnected() {
   // together, the burst that answers it arrives before they are live and is missed.
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
+    requestLeadInput();
   });
 
   // Setup periodic keepalive (every 30 seconds).
@@ -613,7 +617,25 @@ function handleMqttConnected() {
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
     sendKeepalive(state.vebusReceived);
+    requestLeadInput();
   });
+}
+
+// Shelly publishes status on change and does not retain it, so a follower that has just
+// started believes the time switch is off until the lead relay next moves - which, for a
+// time clock, can be hours. `status_update` on the lead's command topic makes it republish
+// every component on the topics this controller already subscribes to, so asking costs no
+// extra subscription and no HTTP.
+//
+// Same shape as the keepalive above, for the same reason: ask on connect, and keep asking
+// until the answer arrives, since the request itself can be the thing that goes missing.
+function requestLeadInput() {
+  if (state.isLeadRelay || !state.leadRelayTopic || state.leadInputReceived) {
+    return;
+  }
+
+  MQTT.publish(config.leadRelay.commandTopic, "status_update", 1, false);
+  logDebug("Asked the lead relay to republish: " + config.leadRelay.commandTopic);
 }
 
 function sendKeepalive(suppressRepublish) {
@@ -643,6 +665,7 @@ function resetMqttData() {
   state.inverterOutput = 0;
   if (!state.isLeadRelay) {
     state.leadInputActive = false;
+    state.leadInputReceived = false;
   }
 
   logDebug("Reset MQTT data due to disconnection");

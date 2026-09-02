@@ -539,3 +539,84 @@ test("the first republish request waits for the subscriptions to land", () => {
   delayed.fn();
   assert.strictEqual(published[0].payload, "", "the delayed one must ask for a republish");
 });
+
+// ===== Picking up the time switch the lead relay already holds =====
+
+// Shelly publishes status on change and does not retain it, so a follower that has just
+// started believes the time switch is off until the lead next moves — hours, for a time
+// clock. Publishing `status_update` to the lead's command topic makes it republish every
+// component on the topics this controller already subscribes to: the same trick as the
+// Victron keepalive above, and it costs no extra subscription and no HTTP.
+function statusUpdates(published, mod) {
+  return published.filter((p) => p.topic === mod.config.leadRelay.commandTopic &&
+                                 p.payload === "status_update");
+}
+
+test("the ask waits for the subscriptions, then goes to the lead's command topic", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+
+  assert.deepStrictEqual(statusUpdates(published, mod), [],
+    "a request sent in the same breath as the subscription loses the answer it asks for");
+
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.strictEqual(statusUpdates(published, mod).length, 1,
+    "the follower assumed the time switch was off instead of asking");
+});
+
+test("the follower keeps asking until the lead answers", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+  const periodic = timers.filter((t) => t.repeat === true).pop();
+
+  published.length = 0;
+  periodic.fn();
+  assert.strictEqual(statusUpdates(published, mod).length, 1,
+    "one lost request would leave the follower blind for the rest of the window");
+
+  mod.processMqttMessage(mod.state.leadRelayTopic, '{"id":0,"state":true}');
+  assert.strictEqual(mod.state.leadInputActive, true);
+
+  published.length = 0;
+  periodic.fn();
+  assert.deepStrictEqual(statusUpdates(published, mod), [],
+    "once answered, stop asking the lead to republish everything every 30 seconds");
+});
+
+test("the lead relay does not ask itself", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.state.isLeadRelay = true;
+  mod.assignLeadRelayTopic();
+
+  mod.handleMqttConnected();
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.deepStrictEqual(statusUpdates(published, mod), [],
+    "its own input is on the device already");
+});
+
+test("the shortage lead asks for no time switch", () => {
+  const { mod, published, timers } = loadShortageLead();
+
+  mod.handleMqttConnected();
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.deepStrictEqual(statusUpdates(published, mod), []);
+});
+
+// A broker drop is not just a gap in the data: the time switch may have moved while the
+// follower was away, and the lead will not say so again until it next moves.
+test("a reconnect asks the lead again", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+  mod.processMqttMessage(mod.state.leadRelayTopic, '{"id":0,"state":true}');
+
+  mod.resetMqttData();
+  published.length = 0;
+  mod.handleMqttConnected();
+  timers.filter((t) => t.repeat === false).pop().fn();
+
+  assert.strictEqual(statusUpdates(published, mod).length, 1,
+    "a follower that kept its answer would ignore a switch that moved while it was down");
+});
