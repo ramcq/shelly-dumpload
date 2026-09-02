@@ -365,7 +365,10 @@ function updateStatus(event) {
 
   let vebusPart = ", VE " + getVebusStateString(state.vebusState);
   let inputPart = ", Input " + (state.inputIsActive ? "ON" : "OFF");
-  let leadPart = !state.isLeadRelay ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
+  // Only a relay that actually follows one reports it. The lead relay reads the time switch
+  // on its own input, and the shortage lead subscribes to no time-switch topic at all, so
+  // for either of them a "Lead" would be the initial value dressed up as a reading.
+  let leadPart = state.leadRelayTopic ? ", Lead " + (state.leadInputActive ? "ON" : "OFF") : "";
 
   let eventPart = event ? ": " + event : "";
 

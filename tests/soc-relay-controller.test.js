@@ -827,6 +827,34 @@ test("an unresolved shortage says which reading is missing", () => {
   assert.ok(text.indexOf("SHORTAGE") < 0, text);
 });
 
+test("the shortage lead reports no lead input it never receives", () => {
+  // It subscribes to no time-switch topic, so leadInputActive never leaves its initial
+  // value - and reporting that as OFF is an invented reading, not a quiet one.
+  const { mod } = loadShortageLead();
+  settle(mod, true);
+
+  const text = statusText(mod);
+
+  assert.ok(text.indexOf("Lead ") < 0,
+    "reported a time switch it hears nothing about: " + text);
+});
+
+test("an immersion still reports the lead input it follows", () => {
+  const { mod } = loadImmersion();
+
+  assert.ok(statusText(mod).indexOf("Lead OFF") >= 0,
+    "a follower stopped reporting the time switch it acts on");
+});
+
+test("the lead relay reports its own input, not itself as a lead", () => {
+  const { mod } = loadRelay(LEAD_RELAY);
+
+  const text = statusText(mod);
+
+  assert.ok(text.indexOf("Lead ") < 0, "the lead relay reported following itself: " + text);
+  assert.ok(text.indexOf("Input OFF") >= 0, text);
+});
+
 test("the shortage lead's banner offers no dump load band", () => {
   const { mod } = loadShortageLead();
 
