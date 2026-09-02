@@ -268,7 +268,9 @@ EVSE's own surplus algorithm.
 **Thermal recovery** — `thermal-dump-controller.js` detects the buffer immersions' thermal
 cutouts (output on, voltage present, no power), then runs the garage fan coil and a
 circulation pump to stir the buffer and bring them back. It suppresses itself while the
-boiler is operating.
+boiler is operating, and equally while it has yet to hear whether the boiler is operating:
+dumping heat is a power system optimisation, and burning wood to feed a fan coil is the one
+outcome worth a few seconds of inhibition at startup to avoid.
 
 **Overload risk, still open.** The surplus controller enforces an inverter contribution limit
 for its own loads, and each DHW immersion controller has a generation gate and a headroom
@@ -487,29 +489,46 @@ nothing at all: the controller commands nothing, which leaves the relay in the u
 behaviour the configuration table above guarantees — where guessing would have run .209 as
 an immersion, locked below 95% and shed by the overload path.
 
-The script asserts `status_ntf` in the device's MQTT config. Every follower reads .209's
-published switch status, and the immersions read the lead relay's input, so a device with
-status notifications off is a controller whose decision never leaves it.
+Every controller asserts `status_ntf` in its own device's MQTT config, rebooting once to set
+it if it is off. Followers read .209's published switch status and the immersions read the
+lead relay's input, so a device with notifications off is a controller whose decision never
+leaves it; the thermal dump reads the buffer immersions', the surplus controller's own
+`light:0` among them, so there it is a stage that boils with nothing watching. The check has
+to run whether or not the client is already connected — on a device that has been up for
+weeks it always is, which is where the same check twice sat and never ran.
 
 The Victron broker behaves the same way, and worse for a value that rarely changes: it
 publishes nothing until a value changes, and the one chance at the rest is the republish an
-empty-payload keepalive triggers. Subscriptions are not reliably live in time for the burst
-following the first keepalive, so a controller can start up and never see `vebus/276/State`
-— which changes only when a generator runs, months apart. Every other topic in the set
-changes every few seconds and arrives regardless, so this fails on exactly the one the gate
-depends on. So the first keepalive waits a second after subscribing, and the periodic one
-keeps asking for a republish until that state has been seen: the delay makes the ordinary
-case immediate, the retry keeps it correct when the delay is not enough. Observed on .209 on
-first deployment, 1 September 2026.
+empty-payload keepalive triggers. That request has to come from a later turn of the script's
+main loop than the subscriptions do, because `MQTT.subscribe` is only acted on once the
+script yields: asked for in the same breath, the burst is answered before anything is
+listening. So the first request goes out on a timer — the length is immaterial, a
+millisecond would do, and the constant is 1 s — and the periodic keepalive keeps asking
+until the value has actually been seen, which is what covers a request or a burst going
+missing.
 
-Shelly status notifications are published on change and are **not** retained, so a script
-that follows another device sees nothing until that device next changes state. Every
-follower must therefore ask rather than assume. Publishing `status_update` to the followed
-device's `<prefix>/command` topic makes it republish every component on `<prefix>/status/…`
-— the topics the follower already holds — so asking costs no extra subscription and no HTTP.
-The DHW immersions do this against the lead relay's input; .164 and .123 will do the same
-against whatever they come to follow. Without it, a controller restarting during a hot water
-window ignores the time switch until the clock next moves.
+Two paths in the site's set have nothing to publish between transitions, so a republish is
+the only way a controller starting up between them ever sees one: `vebus/276/State`, which
+changes when a generator runs, months apart, and `digitalinput/102/State`, which moves when
+the boiler starts or stops firing — several times a day while it is lit, and not at all
+through a spell with power to spare. Everything else — SOC, generation, inverter output,
+tank temperatures — changes every few seconds and arrives regardless, so the fault lands on
+exactly the two paths a gate depends on. Measured on the live broker over 70 seconds, with
+the boiler cold: the tank temperatures arrived four times each and neither of those two
+arrived at all. Observed on .209 on first deployment, 1 September 2026, which read
+VE Off for three minutes while everything else streamed correctly.
+
+Shelly status notifications are published on change and are **not** retained, and how long
+the silence lasts is a property of the signal rather than the device: a PM channel
+republishes every 20–30 seconds whatever it is doing, because its power and energy readings
+drift, while a component with no telemetry — a relay's `input:0` — says nothing at all until
+someone moves it, and a time switch can sit still for hours. So a follower asks rather than
+assumes. Publishing `status_update` to the followed device's `<prefix>/command` topic makes
+it republish every component on `<prefix>/status/…` — the topics the follower already holds
+— so asking costs no extra subscription and no HTTP. The DHW immersions do this against the
+lead relay's input and the surplus controller against each of its remote stages; .164 and
+.123 will do the same against whatever they come to follow. Without it, a controller
+restarting during a hot water window ignores the time switch until the clock next moves.
 
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under

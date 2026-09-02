@@ -83,6 +83,11 @@ let config = {
 
   // Timing settings. There are no dwell timers: SOC control does not chatter, and the
   // measured cycling rate is decades inside the relay's rating. See CONTROLS.md.
+  //
+  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
+  // main loop, so a republish asked for in the same breath is answered before anything is
+  // listening. The length hardly matters - a millisecond would do - only that it lands on
+  // a later turn of the loop.
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
   startupGrace: 3 * 60 * 1000,  // ms - how long the VE.Bus gate waits for its first reading
                                 // before treating silence as trouble. Covers a Cerbo boot
@@ -725,8 +730,8 @@ function handleMqttConnected() {
     logDebug("Subscribed to the heat pump lock: " + state.lockTopic);
   }
 
-  // Ask for a full republish, but not in the same breath as the subscriptions above: sent
-  // together, the burst that answers it arrives before they are live and is missed.
+  // Ask for a full republish, but from a later turn of the main loop than the subscriptions
+  // above - see config.initialKeepaliveDelay.
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
     requestFollowedStatus(true);

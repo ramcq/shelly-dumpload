@@ -62,6 +62,12 @@ let config = {
   checkInterval: 10 * 1000,  // 10 seconds in milliseconds
   minRunTime: 5 * 60 * 1000, // 5 minutes minimum run time
 
+  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
+  // main loop, so a republish asked for in the same breath is answered before anything is
+  // listening. The length hardly matters - a millisecond would do - only that it lands on
+  // a later turn of the loop.
+  initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
+
   // Virtual component IDs (minimal set)
   virtualComponents: {
     status: 200
@@ -109,6 +115,7 @@ let state = {
   topTankTemp: 0,
   bottomTankTemp: 0,
   boilerOperating: false,
+  boilerReceived: false,     // Whether that was published rather than assumed
 
   // Timer
   timerId: null
@@ -196,7 +203,10 @@ function updateStatus(event) {
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
   let tempPart = " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
   let deltaPart = " Δ" + tempDelta.toFixed(1);
-  let boilerPart = " Boiler:" + (state.boilerOperating ? "ON" : "OFF");
+  // "?" is not "OFF": one permits dumping and the other inhibits it, and the status text is
+  // the only instrument on a device that keeps no log across a restart.
+  let boilerPart = " Boiler:" +
+    (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF"));
 
   let dumpState = getDumpLoadState();
   let dumpPart = " Dump:" + dumpState;
@@ -425,6 +435,14 @@ function processMqttMessage(topic, message) {
     if (relativeTopic === config.topics.boilerOperating) {
       state.boilerOperating = (payload.value === 10);
       logDebug("Boiler operating updated: " + state.boilerOperating + " (state=" + payload.value + ")");
+
+      // Worth a console line rather than a debug one: until this arrives the thermal dump
+      // is inhibited, so this is the moment it becomes able to run at all.
+      if (!state.boilerReceived) {
+        state.boilerReceived = true;
+        console.log("Boiler state received: " +
+                   (state.boilerOperating ? "operating" : "stopped"));
+      }
     }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
@@ -448,15 +466,25 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + config.dumpLoads[i].statusTopic);
   }
 
-  // Send initial keepalive
-  sendKeepalive(false);
+  // Ask for a full republish, but from a later turn of the main loop than the
+  // subscriptions above - see config.initialKeepaliveDelay.
+  Timer.set(config.initialKeepaliveDelay, false, function() {
+    sendKeepalive(false);
+  });
 
-  // Setup periodic keepalive (every 30 seconds)
+  // Setup periodic keepalive (every 30 seconds).
+  //
+  // Keep asking for a republish until the boiler state has actually been seen, in case the
+  // yield above was not enough. The broker publishes nothing until a value changes, and the
+  // boiler input moves only when the boiler starts or stops firing - several times a day
+  // while it is lit, and not at all through a spell with power to spare - so between
+  // transitions it is only ever seen in a republish. The tank temperatures drift constantly
+  // and so arrive regardless.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(true);
+    sendKeepalive(state.boilerReceived);
   });
 }
 
@@ -494,12 +522,64 @@ function resetMqttData() {
   state.topTankTemp = 0;
   state.bottomTankTemp = 0;
   state.boilerOperating = false;
+  state.boilerReceived = false;
 
   logDebug("Reset MQTT data due to disconnection");
 }
 
+// Bring the device's own MQTT config up to what this controller needs. Returns true if a
+// reconfigure is under way, which ends in a reboot and so ends this script's run.
+function ensureMqttConfig() {
+  let mqttConfig = Shelly.getComponentConfig("mqtt");
+  if (!mqttConfig) {
+    logDebug("No MQTT config available");
+    return false;
+  }
+
+  let needsConfig = false;
+
+  if (!mqttConfig.enable) {
+    needsConfig = true;
+    logDebug("MQTT is disabled, enabling it");
+  } else if (mqttConfig.server !== config.cerbo.host + ":" + config.cerbo.port) {
+    needsConfig = true;
+    logDebug("MQTT server doesn't match, reconfiguring");
+  } else if (mqttConfig.status_ntf === false) {
+    // Nothing follows this device, but the same setting carries its own two channels and
+    // its status text, which is the only account of what the thermal dump did that can be
+    // read from anywhere but the plant room. Tested for false, not for not-true: a
+    // firmware without the key must not reboot on every start.
+    needsConfig = true;
+    logDebug("MQTT status notifications are off, reconfiguring");
+  }
+
+  if (!needsConfig) {
+    return false;
+  }
+
+  Shelly.call("MQTT.SetConfig", {
+    config: {
+      enable: true,
+      server: config.cerbo.host + ":" + config.cerbo.port,
+      status_ntf: true
+    }
+  }, function(result, error_code, error_message) {
+    if (error_code !== 0) {
+      console.log("Error configuring MQTT: " + error_message);
+      return;
+    }
+
+    logDebug("MQTT configured, rebooting device...");
+    Shelly.call("Shelly.Reboot", {});
+  });
+
+  return true;
+}
+
 function connectMqtt() {
-  // Always set up MQTT event handlers (before any early returns)
+  // Handlers and config first, unconditionally: the device's MQTT client is usually
+  // connected before this script starts, and the config check used to sit behind that
+  // early return, where it never ran at all.
   MQTT.setConnectHandler(handleMqttConnected);
 
   MQTT.setDisconnectHandler(function() {
@@ -512,6 +592,10 @@ function connectMqtt() {
       state.keepaliveTimer = null;
     }
   });
+
+  if (ensureMqttConfig()) {
+    return; // reboot pending
+  }
 
   // Check if MQTT is already connected
   let mqttStatus = Shelly.getComponentStatus("mqtt");
@@ -531,37 +615,7 @@ function connectMqtt() {
     resetMqttData();
   }
 
-  logDebug("Attempting to connect to MQTT at " + config.cerbo.host + ":" + config.cerbo.port);
-
-  // Configure MQTT if needed
-  let mqttConfig = Shelly.getComponentConfig("mqtt");
-  let needsConfig = false;
-
-  if (!mqttConfig.enable) {
-    needsConfig = true;
-    logDebug("MQTT is disabled, enabling it");
-  } else if (mqttConfig.server !== config.cerbo.host + ":" + config.cerbo.port) {
-    needsConfig = true;
-    logDebug("MQTT server doesn't match, reconfiguring");
-  }
-
-  if (needsConfig) {
-    Shelly.call("MQTT.SetConfig", {
-      config: {
-        enable: true,
-        server: config.cerbo.host + ":" + config.cerbo.port
-      }
-    }, function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error configuring MQTT: " + error_message);
-        return;
-      }
-
-      logDebug("MQTT configured, rebooting device...");
-      Shelly.call("Shelly.Reboot", {});
-    });
-    return;
-  }
+  logDebug("Waiting for MQTT connection to " + config.cerbo.host + ":" + config.cerbo.port);
 }
 
 // ===== Device state management =====
@@ -670,13 +724,19 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 2: Stop if boiler is operating
-  if (state.boilerOperating) {
+  // PRIORITY 2: Stop if the boiler is operating, or if we do not know whether it is.
+  //
+  // Dumping heat is a power system optimisation, and it is only worth doing while the
+  // heating side is known not to want that heat. An unheard boiler state therefore counts
+  // as a running one: the state arrives seconds after connecting, and burning wood to feed
+  // a fan coil is the one outcome worth a few seconds of inhibition to avoid.
+  if (state.boilerOperating || !state.boilerReceived) {
+    let reason = state.boilerReceived ? "Boiler Operating" : "Boiler State Unknown";
     if (fanCoil.on) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Boiler Operating");
+      turnOutputOff(OUTPUT_FAN_COIL, reason);
     }
     if (pump.on) {
-      turnOutputOff(OUTPUT_PUMP, "Boiler Operating");
+      turnOutputOff(OUTPUT_PUMP, reason);
     }
     return; // Skip other checks
   }
