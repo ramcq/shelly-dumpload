@@ -10,7 +10,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load } = require("./harness.js");
+const { load, captureLog } = require("./harness.js");
 
 const DUMP = "soc-relay-controller.js";
 
@@ -68,20 +68,6 @@ function switchCommands(calls) {
   return calls
     .filter((c) => c.method === "Switch.Set")
     .map((c) => c.params.on);
-}
-
-// Everything a call printed. The controller logs its status line as well as setting it, and
-// under the harness the virtual component handle is null, so the log is the observable.
-function captureLog(fn) {
-  const lines = [];
-  const realLog = console.log;
-  console.log = function (line) { lines.push(line); };
-  try {
-    fn();
-  } finally {
-    console.log = realLog;
-  }
-  return lines.join("\n");
 }
 
 function statusText(mod) {

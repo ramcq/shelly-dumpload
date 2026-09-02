@@ -7,7 +7,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load } = require("./harness.js");
+const { load, captureLog } = require("./harness.js");
 
 const THERMAL = "thermal-dump-controller.js";
 const SURPLUS = "surplus-dump-controller.js";
@@ -128,4 +128,126 @@ test("every watched load is subscribed to", () => {
   mod.config.dumpLoads.forEach((l) => {
     assert.ok(subscribed.includes(l.statusTopic), l.name + " is not subscribed");
   });
+});
+
+// ===== Seeding the boiler state =====
+
+// The boiler input moves only when the boiler starts or stops firing, and the Victron
+// broker publishes nothing until a value changes, so a controller starting up between
+// transitions hears nothing at all: measured over 70 seconds on the live broker, with
+// power to spare and the boiler cold, the tank temperatures arrived four times each and
+// `digitalinput/102/State` never. It is therefore only ever seen in the burst a republish
+// produces - the one this controller used to ask for in the same breath as its own
+// subscriptions.
+const PORTAL = "c0847dc9a794";
+const BOILER_RUNNING = 10;
+const BOILER_STOPPED = 11;
+
+function victron(mod, key, value) {
+  mod.processMqttMessage("N/" + PORTAL + "/" + mod.config.topics[key],
+    JSON.stringify({ value: value }));
+}
+
+// Hot buffer, one immersion at cutout: everything the thermal dump needs except an answer
+// about the boiler.
+function readyToDump(mod) {
+  victron(mod, "topTankTemp", 80);
+  victron(mod, "bottomTankTemp", 78);
+  mod.processMqttMessage(IMMERSION_4, JSON.stringify(STALLED));
+}
+
+function switchCommands(calls) {
+  return calls.filter((c) => c.method === "Switch.Set").map((c) => c.params);
+}
+
+test("the first republish request waits for a turn of the main loop", () => {
+  const { mod, published, timers } = loadThermal();
+  mod.handleMqttConnected();
+
+  assert.deepStrictEqual(published, [],
+    "a request sent in the same breath as MQTT.subscribe is answered before anything is " +
+    "listening");
+
+  const delayed = timers.filter((t) => t.repeat === false).pop();
+  assert.strictEqual(delayed.ms, mod.config.initialKeepaliveDelay);
+
+  delayed.fn();
+  assert.strictEqual(published[0].payload, "",
+    "an empty payload is what asks the broker to republish everything");
+});
+
+test("keepalives keep asking for a republish until the boiler state is seen", () => {
+  const { mod, published, timers } = loadThermal();
+  mod.handleMqttConnected();
+
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  assert.ok(keepalive, "no periodic keepalive was scheduled");
+
+  published.length = 0;
+  keepalive.fn();
+  assert.strictEqual(published[0].payload, "",
+    "one lost burst would leave the boiler state unknown until it next changed");
+
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+  published.length = 0;
+  keepalive.fn();
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
+    "once seen, stop asking the whole system to republish every 30 seconds");
+});
+
+// Dumping heat is a power system optimisation; the boiler making that heat is not. So an
+// unheard state counts as a running boiler.
+test("an unheard boiler state inhibits the thermal dump", () => {
+  const { mod, calls } = loadThermal();
+  readyToDump(mod);
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the pump ran on the assumption that a boiler nobody has heard from is stopped");
+});
+
+test("the boiler state arriving lifts the inhibition", () => {
+  const { mod, calls } = loadThermal();
+  readyToDump(mod);
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls),
+    [{ id: 1, on: true }, { id: 0, on: true }],
+    "a stalled immersion with a hot tank and a stopped boiler must be recovered");
+});
+
+test("a running boiler still inhibits the dump once heard", () => {
+  const { mod, calls } = loadThermal();
+  readyToDump(mod);
+  victron(mod, "boilerOperating", BOILER_RUNNING);
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), []);
+});
+
+// A change made while the broker was away is never repeated, so the reading afterwards is
+// unknown rather than merely old.
+test("a broker drop makes the boiler state unknown again", () => {
+  const { mod } = loadThermal();
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+  assert.strictEqual(mod.state.boilerReceived, true);
+
+  mod.resetMqttData();
+
+  assert.strictEqual(mod.state.boilerReceived, false);
+  assert.strictEqual(mod.state.boilerOperating, false);
+});
+
+test("the status line tells an unheard boiler from a stopped one", () => {
+  const { mod } = loadThermal();
+
+  assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("Boiler:?") >= 0,
+    "unknown and stopped read the same, and only one of them permits dumping");
+
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+  assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("Boiler:OFF") >= 0);
 });

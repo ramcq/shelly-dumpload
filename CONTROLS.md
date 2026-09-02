@@ -268,7 +268,9 @@ EVSE's own surplus algorithm.
 **Thermal recovery** — `thermal-dump-controller.js` detects the buffer immersions' thermal
 cutouts (output on, voltage present, no power), then runs the garage fan coil and a
 circulation pump to stir the buffer and bring them back. It suppresses itself while the
-boiler is operating.
+boiler is operating, and equally while it has yet to hear whether the boiler is operating:
+dumping heat is a power system optimisation, and burning wood to feed a fan coil is the one
+outcome worth a few seconds of inhibition at startup to avoid.
 
 **Overload risk, still open.** The surplus controller enforces an inverter contribution limit
 for its own loads, and each DHW immersion controller has a generation gate and a headroom
@@ -493,14 +495,24 @@ status notifications off is a controller whose decision never leaves it.
 
 The Victron broker behaves the same way, and worse for a value that rarely changes: it
 publishes nothing until a value changes, and the one chance at the rest is the republish an
-empty-payload keepalive triggers. Subscriptions are not reliably live in time for the burst
-following the first keepalive, so a controller can start up and never see `vebus/276/State`
-— which changes only when a generator runs, months apart. Every other topic in the set
-changes every few seconds and arrives regardless, so this fails on exactly the one the gate
-depends on. So the first keepalive waits a second after subscribing, and the periodic one
-keeps asking for a republish until that state has been seen: the delay makes the ordinary
-case immediate, the retry keeps it correct when the delay is not enough. Observed on .209 on
-first deployment, 1 September 2026.
+empty-payload keepalive triggers. That request has to come from a later turn of the script's
+main loop than the subscriptions do, because `MQTT.subscribe` is only acted on once the
+script yields: asked for in the same breath, the burst is answered before anything is
+listening. So the first request goes out on a timer — the length is immaterial, a
+millisecond would do, and the constant is 1 s — and the periodic keepalive keeps asking
+until the value has actually been seen, which is what covers a request or a burst going
+missing.
+
+Two paths in the site's set have nothing to publish between transitions, so a republish is
+the only way a controller starting up between them ever sees one: `vebus/276/State`, which
+changes when a generator runs, months apart, and `digitalinput/102/State`, which moves when
+the boiler starts or stops firing — several times a day while it is lit, and not at all
+through a spell with power to spare. Everything else — SOC, generation, inverter output,
+tank temperatures — changes every few seconds and arrives regardless, so the fault lands on
+exactly the two paths a gate depends on. Measured on the live broker over 70 seconds, with
+the boiler cold: the tank temperatures arrived four times each and neither of those two
+arrived at all. Observed on .209 on first deployment, 1 September 2026, which read
+VE Off for three minutes while everything else streamed correctly.
 
 Shelly status notifications are published on change and are **not** retained, so a script
 that follows another device sees nothing until that device next changes state. Every

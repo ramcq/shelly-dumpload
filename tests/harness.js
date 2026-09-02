@@ -136,4 +136,18 @@ function load(scriptName, deviceId) {
   return { mod, published, subscribed, calls, timers, handlers };
 }
 
-module.exports = { load };
+// Everything a call printed. A controller logs its status line as well as setting it, and
+// under the harness the virtual component handle is null, so the log is the observable.
+function captureLog(fn) {
+  const lines = [];
+  const realLog = console.log;
+  console.log = function (line) { lines.push(line); };
+  try {
+    fn();
+  } finally {
+    console.log = realLog;
+  }
+  return lines.join("\n");
+}
+
+module.exports = { load, captureLog };
