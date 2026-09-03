@@ -55,7 +55,12 @@ let config = {
   topics: {
     topTankTemp: "temperature/100/Temperature",      // Top tank temperature sensor
     bottomTankTemp: "temperature/101/Temperature",   // Bottom tank temperature sensor
-    boilerOperating: "digitalinput/102/State"        // Boiler digital input (10=running, 11=stopped)
+    boilerOperating: "digitalinput/102/State",       // Boiler digital input (10=running, 11=stopped)
+
+    // The bridge holds its last values when modbus drops, so they keep arriving and keep
+    // looking fresh; this is the only thing that says otherwise. One path for all three,
+    // since its services fail together.
+    froelingConnected: "temperature/100/Connected"
   },
 
   // Timing settings
@@ -116,6 +121,8 @@ let state = {
   bottomTankTemp: 0,
   boilerOperating: false,
   boilerReceived: false,     // Whether that was published rather than assumed
+  bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
+  bridgeConnectedReceived: false,  // is no claim either way
 
   // Timer
   timerId: null
@@ -162,6 +169,11 @@ function isLoadStalled(load) {
 }
 
 // Check if any dump load is stalled
+// Never having heard is no claim either way.
+function bridgeIsDown() {
+  return state.bridgeConnectedReceived && !state.bridgeConnected;
+}
+
 function isDumpLoadStalled() {
   for (let i = 0; i < state.dumpLoads.length; i++) {
     if (isLoadStalled(state.dumpLoads[i])) {
@@ -200,13 +212,18 @@ function updateStatus(event) {
   let fanPart = " Fan:" + (getOutput(OUTPUT_FAN_COIL).on ? "ON" : "OFF");
   let pumpPart = " Pump:" + (getOutput(OUTPUT_PUMP).on ? "ON" : "OFF");
 
+  // A held value is shown as no reading, because that is what it is.
+  let tankUnreadable = bridgeIsDown();
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
-  let tempPart = " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
-  let deltaPart = " Δ" + tempDelta.toFixed(1);
+  let tempPart = tankUnreadable
+    ? " Tank:?"
+    : " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
+  let deltaPart = tankUnreadable ? "" : " Δ" + tempDelta.toFixed(1);
   // "?" is not "OFF": one permits dumping and the other inhibits it, and the status text is
   // the only instrument on a device that keeps no log across a restart.
   let boilerPart = " Boiler:" +
-    (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF"));
+    (tankUnreadable ? "unreadable"
+      : (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF")));
 
   let dumpState = getDumpLoadState();
   let dumpPart = " Dump:" + dumpState;
@@ -431,6 +448,22 @@ function processMqttMessage(topic, message) {
       state.bottomTankTemp = parseFloat(payload.value);
     }
 
+    // Read at the point of use, never acted on here: the bridge keeps publishing its held
+    // values, so a controller that forgot them would take the next republish for readings.
+    if (relativeTopic === config.topics.froelingConnected) {
+      let wasConnected = state.bridgeConnected;
+      let wasKnown = state.bridgeConnectedReceived;
+      state.bridgeConnected = (parseInt(payload.value) === 1);
+      state.bridgeConnectedReceived = true;
+
+      if (!wasKnown || wasConnected !== state.bridgeConnected) {
+        console.log("Froeling bridge " + (state.bridgeConnected
+          ? "reading the boiler again"
+          : "cannot read the boiler - suspending the thermal dump"));
+      }
+
+    }
+
     // Update boiler operating status (10=running, 11=stopped)
     if (relativeTopic === config.topics.boilerOperating) {
       state.boilerOperating = (payload.value === 10);
@@ -484,7 +517,7 @@ function setupMqttSubscriptionsAndKeepalive() {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(state.boilerReceived);
+    sendKeepalive(state.boilerReceived && state.bridgeConnectedReceived);
   });
 }
 
@@ -523,6 +556,8 @@ function resetMqttData() {
   state.bottomTankTemp = 0;
   state.boilerOperating = false;
   state.boilerReceived = false;
+  state.bridgeConnected = true;
+  state.bridgeConnectedReceived = false;
 
   logDebug("Reset MQTT data due to disconnection");
 }
@@ -730,8 +765,10 @@ function checkSystemState() {
   // heating side is known not to want that heat. An unheard boiler state therefore counts
   // as a running one: the state arrives seconds after connecting, and burning wood to feed
   // a fan coil is the one outcome worth a few seconds of inhibition to avoid.
-  if (state.boilerOperating || !state.boilerReceived) {
-    let reason = state.boilerReceived ? "Boiler Operating" : "Boiler State Unknown";
+  if (state.boilerOperating || !state.boilerReceived || bridgeIsDown()) {
+    let reason = bridgeIsDown()
+      ? "Boiler Unreadable"
+      : (state.boilerReceived ? "Boiler Operating" : "Boiler State Unknown");
     if (fanCoil.on) {
       turnOutputOff(OUTPUT_FAN_COIL, reason);
     }
@@ -741,13 +778,14 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 3: Stop if tank is not hot
-  if (state.topTankTemp < config.thresholds.minTankTemp) {
+  // PRIORITY 3: Stop if the tank is not hot, or cannot be read.
+  if (bridgeIsDown() || state.topTankTemp < config.thresholds.minTankTemp) {
+    let reason = bridgeIsDown() ? "Tank Unreadable" : "Tank Below Temperature";
     if (fanCoil.on) {
-      turnOutputOff(OUTPUT_FAN_COIL, "Tank Below Temperature");
+      turnOutputOff(OUTPUT_FAN_COIL, reason);
     }
     if (pump.on) {
-      turnOutputOff(OUTPUT_PUMP, "Tank Below Temperature");
+      turnOutputOff(OUTPUT_PUMP, reason);
     }
     return;
   }

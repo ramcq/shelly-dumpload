@@ -176,7 +176,7 @@ test("the first republish request waits for a turn of the main loop", () => {
     "an empty payload is what asks the broker to republish everything");
 });
 
-test("keepalives keep asking for a republish until the boiler state is seen", () => {
+test("keepalives keep asking for a republish until the silent readings are seen", () => {
   const { mod, published, timers } = loadThermal();
   mod.handleMqttConnected();
 
@@ -191,8 +191,77 @@ test("keepalives keep asking for a republish until the boiler state is seen", ()
   victron(mod, "boilerOperating", BOILER_STOPPED);
   published.length = 0;
   keepalive.fn();
+  assert.strictEqual(published[0].payload, "",
+    "the bridge state is as silent as the boiler input, and qualifies all three readings");
+
+  bridge(mod, true);
+  published.length = 0;
+  keepalive.fn();
   assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
     "once seen, stop asking the whole system to republish every 30 seconds");
+});
+
+// ===== The bridge behind every Fröling reading =====
+
+// dbus-froeling holds the last temperature and the last boiler state when modbus drops, so
+// both keep arriving and keep looking fresh. Recovering waste heat is a power system
+// optimisation, so losing sight of the boiler suppresses it rather than degrading it.
+function bridge(mod, connected) {
+  victron(mod, "froelingConnected", connected ? 1 : 0);
+}
+
+// Which outputs were commanded on. switchCommands() here yields {id, on} params rather than
+// bare booleans, so a test that reaches for a boolean in it never matches anything.
+function turnedOn(calls) {
+  return switchCommands(calls).filter((p) => p.on).map((p) => p.id).sort();
+}
+
+test("a bridge that cannot read the boiler suspends the thermal dump", () => {
+  const { mod, calls } = loadThermal();
+  readyToDump(mod);
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+  bridge(mod, true);
+  mod.checkSystemState();
+  assert.notDeepStrictEqual(switchCommands(calls), [], "nothing was dumping to begin with");
+
+  calls.length = 0;
+  bridge(mod, false);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(turnedOn(calls), [],
+    "kept dumping into a tank nobody could read, with the boiler state held");
+});
+
+test("a republish burst does not revive a held reading", () => {
+  // The bridge holds its last values, so a full republish re-delivers all of them looking
+  // exactly as they did when they were live. Suppression has to be a property of the
+  // readings, not an event that happened once when /Connected moved.
+  const { mod, calls } = loadThermal();
+  readyToDump(mod);
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+  bridge(mod, true);
+  bridge(mod, false);
+
+  // What the Cerbo sends back on the next keepalive: every held value, unchanged.
+  victron(mod, "topTankTemp", 80);
+  victron(mod, "bottomTankTemp", 76);
+  victron(mod, "boilerOperating", BOILER_STOPPED);
+
+  calls.length = 0;
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(turnedOn(calls), [],
+    "a republish of the held readings put the thermal dump back to work");
+});
+
+test("a held tank temperature is shown as no reading rather than as a number", () => {
+  const { mod } = loadThermal();
+  readyToDump(mod);
+  victron(mod, "topTankTemp", 80);
+  bridge(mod, false);
+
+  const text = captureLog(function () { mod.updateStatus(); });
+  assert.ok(text.indexOf("Tank:?") >= 0, text);
 });
 
 // Dumping heat is a power system optimisation; the boiler making that heat is not. So an

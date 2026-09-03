@@ -99,7 +99,11 @@ let config = {
   topics: {
     vebusState: "vebus/276/State",             // VE.Bus state - the power system rung, read
                                                // before the lock and never after it
-    boilerOperating: "digitalinput/102/State"  // Boiler digital input (10=running, 11=stopped)
+    boilerOperating: "digitalinput/102/State", // Boiler digital input (10=running, 11=stopped)
+
+    // The bridge holds its last boiler state when modbus drops, so a held state keeps
+    // arriving and keeps looking fresh; this is the only thing that says otherwise.
+    froelingConnected: "digitalinput/102/Connected"
   },
 
   // Virtual component IDs
@@ -160,6 +164,8 @@ let state = {
                              // the inverter is off-grid abnormal
   boilerOperating: false,
   boilerReceived: false,     // Whether that was published rather than assumed
+  bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
+  bridgeConnectedReceived: false,  // is no claim either way
 
   // The exercise run
   lastIgnition: null,        // ms, from KVS. Null while unread, which makes the term inert
@@ -244,6 +250,11 @@ function getVebusStateString(vebusState) {
   if (vebusState === 11) return "Power Supply";
   if (vebusState === 252) return "External Control";
   return "Unknown(" + vebusState + ")";
+}
+
+// Never having heard is no claim either way.
+function bridgeIsDown() {
+  return state.bridgeConnectedReceived && !state.bridgeConnected;
 }
 
 // Resolve whether this is the device the file is written for. Everything it commands is one
@@ -337,7 +348,8 @@ function updateExerciseRun() {
 function exerciseDue() {
   let now = syncedNow();
 
-  if (now === null || !state.boilerReceived) {
+  // A held state is not a state: nothing to start that could be finished.
+  if (now === null || !state.boilerReceived || bridgeIsDown()) {
     return false;
   }
 
@@ -483,9 +495,9 @@ function updateStatus(event) {
     ? "?"
     : getVebusStateString(state.vebusState) + vebusShortPart +
       (state.vebusStale ? " (stale)" : ""));
-  let boilerPart = ", Boiler " + (!state.boilerReceived
-    ? "?"
-    : (state.boilerOperating ? "ON" : "OFF"));
+  let boilerPart = ", Boiler " + (bridgeIsDown()
+    ? "unreadable"
+    : (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF")));
   let dhwPart = ", DHW " + (!state.dhwDemandReceived
     ? "?"
     : (state.dhwDemand ? "ON" : "OFF"));
@@ -714,6 +726,23 @@ function processMqttMessage(topic, message) {
       }
     }
 
+    // Read at the point of use, never acted on here: the bridge keeps publishing its held
+    // state, so a controller that forgot it would take the next republish for a reading.
+    // Ignitions are unaffected - a republish of the same value is no edge.
+    if (relativeTopic === config.topics.froelingConnected) {
+      let wasConnected = state.bridgeConnected;
+      let wasKnown = state.bridgeConnectedReceived;
+      state.bridgeConnected = (parseInt(payload.value) === 1);
+      state.bridgeConnectedReceived = true;
+
+      if (!wasKnown || wasConnected !== state.bridgeConnected) {
+        console.log("Fröling bridge " + (state.bridgeConnected
+          ? "reading the boiler again"
+          : "cannot read the boiler - suspending the exercise run"));
+      }
+
+    }
+
     // The boiler input (10=running, 11=stopped). Its rising edge is the only observation of
     // an ignition this controller ever gets, and the exercise clock is made of them.
     if (relativeTopic === config.topics.boilerOperating) {
@@ -767,7 +796,8 @@ function handleMqttConnected() {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(state.vebusReceived && state.boilerReceived);
+    sendKeepalive(state.vebusReceived && state.boilerReceived &&
+                  state.bridgeConnectedReceived);
     requestFollowedStatus(false);
   });
 }
@@ -832,6 +862,8 @@ function resetMqttData() {
   state.dhwDemandReceived = false;
   state.boilerOperating = false;
   state.boilerReceived = false;
+  state.bridgeConnected = true;
+  state.bridgeConnectedReceived = false;
 
   logDebug("Reset MQTT data due to disconnection");
 }

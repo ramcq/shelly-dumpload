@@ -52,6 +52,14 @@ function boilerFlow(mod, degrees) {
   victron(mod, "boilerFlow", degrees);
 }
 
+// What dbus-froeling says about its own modbus connection. On a lost connection it holds the
+// last temperature rather than invalidating it — deliberately, so a transient error does not
+// read as the boiler stopping — so this path is the only thing that ever says the buffer
+// readings have gone stale.
+function bridge(mod, connected) {
+  victron(mod, "froelingConnected", connected ? 1 : 0);
+}
+
 // The DHW time clock, wired to this relay's own input. Hardware `follow` has already acted
 // on it by the time the script reads it.
 function timeClock(mod, calling) {
@@ -95,6 +103,7 @@ function settle(mod, relayIsOn) {
 
 function pastStartupGrace(mod) {
   mod.state.startedAt = Date.now() - (mod.config.startupGrace + 1000);
+  mod.state.listeningSince = mod.state.startedAt;
 }
 
 // What the controller commanded its own relay to do, if anything. Shelly.call never calls
@@ -148,6 +157,7 @@ test("it follows the lock rather than deriving shortage", () => {
   assert.deepStrictEqual(subscribed.sort(), [
     "N/" + PORTAL + "/temperature/100/Temperature",
     "N/" + PORTAL + "/temperature/103/Temperature",
+    "N/" + PORTAL + "/temperature/100/Connected",
     HP_LOCK
   ].sort());
   assert.ok(subscribed.length <= 10,
@@ -527,6 +537,177 @@ test("a shortage that has already begun is not re-entered on every lock message"
     "a republish restarted the entry window");
 });
 
+// ===== The bridge falling over =====
+
+test("a held temperature is not a reading", () => {
+  // dbus-froeling leaves the last value on D-Bus when modbus drops, so the number keeps
+  // arriving and keeps looking fresh. Only /Connected says otherwise.
+  const { mod } = loadEnable();
+  windowConditions(mod);
+  assert.strictEqual(mod.guardTemperature(), 68);
+
+  bridge(mod, false);
+
+  assert.strictEqual(mod.guardTemperature(), null,
+    "a buffer nobody can read was still guarding the window");
+});
+
+test("a blind window runs anyway", () => {
+  // In shortage the buffer is the only route to hot water, and .164 releases the boiler on
+  // the same shortage. Cold water is noticed in hours.
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  windowConditions(mod);
+
+  bridge(mod, false);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+  assert.strictEqual(mod.state.windowBlind, true);
+});
+
+test("a blind window keeps to its slots rather than running on", () => {
+  // Unguarded is not unbounded: the schedule is what stops DHW running indefinitely against
+  // the space heating.
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  windowConditions(mod);
+  bridge(mod, false);
+  clockAt("07:30");
+  mod.state.entryWindowUntil = 0;
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), []);
+});
+
+test("the boiler release is .164's business, not this controller's", () => {
+  // .164 releases the boiler on the same shortage that opens the window, so a second copy
+  // of that decision here would exclude nothing and cost a subscription.
+  const { mod, subscribed } = loadEnable();
+  mod.handleMqttConnected();
+
+  assert.ok(subscribed.indexOf("shelly1minig3-d885ac0818d0/status/switch:0") < 0,
+    subscribed.join(", "));
+});
+
+test("nothing runs blind outside shortage", () => {
+  // A window is a shortage window first. With the heat pump running, the immersions make the
+  // same water more directly.
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  windowConditions(mod);
+  lock(mod, true);
+
+  bridge(mod, false);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), []);
+});
+
+test("a bridge that comes back is guarded again", () => {
+  const { mod } = loadEnable();
+  windowConditions(mod);
+  bridge(mod, false);
+  assert.strictEqual(mod.bufferUnreadable(), true);
+
+  bridge(mod, true);
+
+  assert.strictEqual(mod.bufferUnreadable(), false);
+  assert.strictEqual(mod.guardTemperature(), 68);
+});
+
+test("silence is blindness only past the grace, but being told is immediate", () => {
+  // An absent reading is not a stale one. A controller that has just started has heard
+  // nothing yet and its temperatures are seconds away; a bridge that says it is disconnected
+  // has told us something.
+  const told = loadEnable();
+  told.mod.state.listeningSince = Date.now();
+  bridge(told.mod, false);
+  assert.strictEqual(told.mod.bufferUnreadable(), true,
+    "being told was not believed at once");
+
+  const silent = loadEnable();
+  silent.mod.state.listeningSince = Date.now();
+  assert.strictEqual(silent.mod.bufferUnreadable(), false,
+    "a controller that had just started gave up on readings still in flight");
+
+  pastStartupGrace(silent.mod);
+  assert.strictEqual(silent.mod.bufferUnreadable(), true,
+    "a bridge that never said anything at all was waited on indefinitely");
+});
+
+test("the silence grace runs from the reconnect, not from script start", () => {
+  // A broker drop clears the temperatures, and the Cerbo's republish takes a moment to
+  // deliver them again. On a controller that has been up for days a grace measured from boot
+  // expired long ago, and a poll landing in that gap would latch the window blind for the
+  // hour — against a buffer that turns out to be cold a second later.
+  const { mod } = loadEnable();
+  mod.state.startedAt = Date.now() - (5 * 24 * 60 * MINUTES);
+  windowConditions(mod);
+  bridge(mod, true);
+
+  mod.resetMqttData();
+  mod.handleMqttConnected();
+
+  assert.strictEqual(mod.bufferUnreadable(), false,
+    "gave up on temperatures that were still in flight");
+
+  bufferTop(mod, 35);
+  boilerFlow(mod, 30);
+  mod.checkSystemState();
+
+  assert.strictEqual(mod.state.windowLatched, false);
+});
+
+test("a blind window is named as one", () => {
+  const { mod } = loadEnable();
+  settle(mod, false);
+  windowConditions(mod);
+  bridge(mod, false);
+  mod.checkSystemState();
+
+  const text = statusText(mod);
+  assert.ok(text.indexOf("Buffer ?") >= 0, text);
+  assert.ok(text.indexOf("blind") >= 0, text);
+});
+
+test("the guard still decides while the bridge is up", () => {
+  // A released boiler is not a reason to bypass a reading that exists and says 45 °C.
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  windowConditions(mod);
+  bufferTop(mod, 45);
+  boilerFlow(mod, 40);
+  bridge(mod, true);
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), []);
+});
+
+test("the bridge state is asked for, being silent between transitions", () => {
+  const { mod, subscribed, published, timers } = loadEnable();
+  mod.handleMqttConnected();
+
+  assert.ok(subscribed.indexOf("N/" + PORTAL + "/temperature/100/Connected") >= 0,
+    subscribed.join(", "));
+  assert.ok(subscribed.length <= 10, "subscribed to " + subscribed.length);
+
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  bufferTop(mod, 70);
+  boilerFlow(mod, 70);
+  published.length = 0;
+  keepalive.fn();
+  assert.strictEqual(published[0].payload, "",
+    "stopped asking for a republish before the bridge state had ever arrived");
+
+  bridge(mod, true);
+  published.length = 0;
+  keepalive.fn();
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0, published[0].payload);
+});
+
 // ===== A clock the device did not invent =====
 
 test("a device that has never synchronised runs no scheduled slots", () => {
@@ -742,6 +923,7 @@ test("keepalives ask for a full republish until both temperatures arrive", () =>
 
   bufferTop(mod, 50);
   boilerFlow(mod, 50);
+  bridge(mod, true);
   published.length = 0;
   keepalive.fn();
   assert.ok(published[0].payload.indexOf("suppress-republish") >= 0, published[0].payload);

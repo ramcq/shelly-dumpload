@@ -289,8 +289,13 @@ Output ON + Voltage ≥ 200V + Power ≤ 5W = Thermal cutout detected
 - Tracks expected vs actual output state
 - Only triggers checkSystemState() on unexpected changes
 
+**When the Fröling bridge cannot read the boiler** — `temperature/100/Connected` at 0 —
+priorities 2 and 3 both suppress, on `bridgeIsDown()` rather than on the readings, which are
+left where they are because the bridge keeps publishing them. See
+[CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
+
 **Configuration:**
-- Monitors Victron temperature sensors (top/bottom tank)
+- Monitors Victron temperature sensors (top/bottom tank), and the bridge behind them
 - Monitors boiler digital input state
 - 5-minute minimum run time
 - 10-second check interval
@@ -372,10 +377,15 @@ found closed is left alone while any of those readings is still outstanding — 
 "already on" clause is what carries a burn through a redeploy, and it needs no stored state
 because the relay itself is the state.
 
-**MQTT Subscriptions:** four — the lock, the DHW time clock, `vebus/276/State` and the
-boiler input. Both relay inputs and both Victron paths are silent between transitions, so all
-four are asked for rather than waited on; see
+**MQTT Subscriptions:** five — the lock, the DHW time clock, `vebus/276/State`, the boiler
+input and `digitalinput/102/Connected`. Every one of them is silent between transitions, so
+all five are asked for rather than waited on; see
 [Seeding State From Other Devices](#seeding-state-from-other-devices).
+
+**When the Fröling bridge cannot read the boiler** — `/Connected` at 0 — `exerciseDue()`
+returns false; the other three rungs never touch the Fröling. The state itself is not
+forgotten, since the bridge keeps publishing it: suppression is read at the point of use. See
+[CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
 
 **Configuration:**
 - One device, matched on the ID it reports at startup. .123 is next door in the same cupboard
@@ -395,9 +405,8 @@ four are asked for rather than waited on; see
 **Purpose:** Permit heat to move from the buffer into the three cylinders
 
 The enable permits and never asks: the cylinder thermostats decide whether anything actually
-moves, which is why nothing here senses cylinder temperature. Close the enable and a cool
-cylinder loads itself; a hot one does nothing. It is not DHW demand and releases no boiler —
-.164 reads this device's *input* for that rung, never its relay.
+moves, which is why nothing here senses cylinder temperature. It is not DHW demand and
+releases no boiler — .164 reads this device's *input* for that rung, never its relay.
 
 **The ladder.** Two rungs, first match wins.
 
@@ -407,43 +416,35 @@ cylinder loads itself; a hot one does nothing. It is not DHW demand and releases
 | 2 | A shortage DHW window | .209's switch status, and the local wall clock | buffer top or boiler flow ≥ 60 °C |
 
 **The clock is first because it takes authority.** A `Switch.Set` overrides `follow` until
-the next input edge, so a controller that read its own input second would open an enable the
-user asked for at 05:30 the moment its window expired at 06:00. It is also the rung that has
-to keep working with the Cerbo down, the Fröling stale or the network broken — the user is
-physically asking for hot water — so nothing above it may depend on any of them, and it is
-not weighed against a buffer reading.
+the next input edge, so reading its own input second would open an enable the user asked for
+at 05:30 the moment a window expired at 06:00. It is also the rung that must keep working
+with the Cerbo down, so nothing above it may depend on anything arriving over MQTT.
 
 **The shortage DHW window:** the rule — one hour in six, in shortage only, guarded on buffer
 temperature — and the reasoning are in [CONTROLS.md](CONTROLS.md#dhw). What this script holds:
 - `config.window.slotHours`, compared against the first two characters of `sys.time` rather
-  than parsed, so nothing here has to decide what "08" is worth. They are wall-clock times, so
-  a device that has never reached an NTP server runs no scheduled slots at all
-- `config.window.entryWindowLength`, the window on entering shortage — an interval rather
-  than a time, and so the one that works without a synchronised clock
+  than parsed. They are wall-clock times, so a device that has never reached an NTP server
+  runs no scheduled slots; `config.window.entryWindowLength` is an interval and still works
 - `config.window.minBufferTemp`, against the higher of buffer top (`temperature/100`) and
-  boiler flow (`temperature/103`), both from `dbus-froeling`. Neither is read as cold before
-  it has arrived, and with only one of them arriving the guard runs on that one alone — on
-  buffer top that means waiting out the lag, on flow it means losing the window when a burn
-  ends
-- `state.windowKey` and `state.windowLatched` — the flag that keeps the enable closed for the
-  rest of a window. It is set once per poll, in the same check that commands the relay, so it
-  never records a guard the enable did not act on, and it carries across two windows that
-  touch because it is cleared the moment there is *no* window. See
-  [Dwell Timers](#dwell-timers) for why it is not one
+  boiler flow (`temperature/103`). Neither is read as cold before it has arrived, and with
+  only one arriving the guard runs on that one alone
+- `temperature/100/Connected`, the only thing that says a buffer reading has stopped being
+  measured. At 0 — or with no reading past `config.startupGrace`, measured from the last
+  connect — the window runs unguarded
+- `state.windowKey` and `state.windowLatched`, the flag that holds the enable closed for the
+  rest of a window. Set once per poll, in the same check that commands the relay, and carried
+  across two windows that touch. See [Dwell Timers](#dwell-timers) for why it is not one
 
 **A restart** finds the contact wherever the last run left it and nothing written down. A
-relay found closed is left alone while any followed reading is still outstanding — past
-`config.startupGrace`, silence is taken at face value — and a window still justified simply
-re-latches on the guard. One consequence is deliberate: a restart part way through a shortage
-looks like entering one, so it opens an entry window, which costs at most one extra guarded
-hour.
+relay found closed is left alone while any followed reading is outstanding; past
+`config.startupGrace`, silence is taken at face value. A restart part way through a shortage
+reads as entering one and opens an entry window, which costs at most an extra guarded hour.
 
-**MQTT Subscriptions:** three — the heat pump lock, buffer top and boiler flow. Following the
-lock rather than deriving shortage is what keeps it there; deriving it would have added SOC,
-both generation figures and the inverter output, for a script whose job is moving heat
-between vessels. See [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
-Both temperatures are self-announcing and the lock is not, so only the lock is asked for; see
-[Seeding State From Other Devices](#seeding-state-from-other-devices).
+**MQTT Subscriptions:** four — the heat pump lock, buffer top, boiler flow and the bridge
+behind the last two. Following the lock rather than deriving shortage is what keeps it there;
+see [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md). Both
+temperatures are self-announcing; the lock and the bridge state are not, so those are asked
+for — see [Seeding State From Other Devices](#seeding-state-from-other-devices).
 
 **Configuration:**
 - One device, matched on the ID it reports at startup. .164 is next door in the same cupboard

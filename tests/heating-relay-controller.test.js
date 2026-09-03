@@ -62,6 +62,13 @@ function boiler(mod, running) {
   victron(mod, "boilerOperating", running ? RUNNING : STOPPED);
 }
 
+// What dbus-froeling says about its own modbus connection. The boiler input cannot say it:
+// on a lost connection the bridge holds the last state rather than invalidating it, so that
+// a transient error does not read here as an ignition.
+function bridge(mod, connected) {
+  victron(mod, "froelingConnected", connected ? 1 : 0);
+}
+
 // The inverter has been off-grid abnormal for `ms`. The reading itself starts that clock, so
 // a test that wants it to have been running a while says so afterwards.
 function vebusShortFor(mod, vebusState, ms) {
@@ -175,6 +182,7 @@ test("it follows the lock rather than deriving shortage", () => {
 
   assert.deepStrictEqual(subscribed.sort(), [
     "N/" + PORTAL + "/digitalinput/102/State",
+    "N/" + PORTAL + "/digitalinput/102/Connected",
     "N/" + PORTAL + "/vebus/276/State",
     DHW_CLOCK,
     HP_LOCK
@@ -885,10 +893,11 @@ test("a disconnect handler is installed even when MQTT is already connected", ()
     "nothing would ever notice the broker going away");
 });
 
-test("keepalives keep asking for a republish until both silent readings arrive", () => {
-  // vebus/276/State changes when a generator runs, months apart, and the boiler input when
-  // the boiler starts or stops firing. Neither has anything to publish in between, so both
-  // are only ever seen in a republish burst — and both are rungs of this ladder.
+test("keepalives keep asking for a republish until every silent reading arrives", () => {
+  // vebus/276/State changes when a generator runs, months apart; the boiler input when the
+  // boiler starts or stops firing; and the bridge's own state when modbus drops or returns.
+  // None has anything to publish in between, so all three are only ever seen in a republish
+  // burst — and all three decide whether a rung of this ladder can be read.
   const { mod, published, timers } = loadRelease();
   mod.handleMqttConnected();
 
@@ -908,8 +917,112 @@ test("keepalives keep asking for a republish until both silent readings arrive",
   boiler(mod, false);
   published.length = 0;
   keepalive.fn();
+  assert.strictEqual(published[0].payload, "", "the bridge state had still not arrived");
+
+  bridge(mod, true);
+  published.length = 0;
+  keepalive.fn();
   assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
     "once seen, stop asking the whole system to republish every 30 seconds");
+});
+
+// ===== The bridge behind the boiler input =====
+
+test("a bridge that cannot read the boiler takes the exercise run with it", () => {
+  // dbus-froeling holds the last state when modbus drops, so the boiler input keeps
+  // arriving and keeps looking fresh. An exercise run reasons about a boiler it can see.
+  const { mod } = loadRelease();
+  clockAt(Date.now());
+  heardEverything(mod);
+  bridge(mod, true);
+  mod.state.lastIgnition = Date.now() - (20 * DAYS);
+  assert.strictEqual(mod.exerciseDue(), true);
+
+  bridge(mod, false);
+
+  assert.strictEqual(mod.exerciseDue(), false,
+    "fourteen days were counted against a boiler nobody could read");
+});
+
+test("a republish burst does not revive the exercise run", () => {
+  // Clearing the boiler state on the edge also makes this controller ask the Cerbo for a
+  // full republish every thirty seconds — which is the very burst that hands the held state
+  // straight back. Suppression has to be a property of the reading.
+  const { mod } = loadRelease();
+  clockAt(Date.now());
+  heardEverything(mod);
+  bridge(mod, true);
+  mod.state.lastIgnition = Date.now() - (20 * DAYS);
+  bridge(mod, false);
+  assert.strictEqual(mod.exerciseDue(), false);
+
+  boiler(mod, false);   // the held state, re-delivered by the next republish
+
+  assert.strictEqual(mod.exerciseDue(), false,
+    "fourteen days were counted against a boiler nobody could read");
+  assert.strictEqual(mod.releaseReason(), "",
+    "the release closed on a boiler nobody could read");
+});
+
+test("asking for a republish is not what suppression is made of", () => {
+  // A controller that suppressed by forgetting its reading would ask the whole system to
+  // republish every thirty seconds for as long as the bridge stayed down.
+  const { mod, published, timers } = loadRelease();
+  mod.handleMqttConnected();
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  heardEverything(mod);
+  bridge(mod, true);
+
+  bridge(mod, false);
+  published.length = 0;
+  keepalive.fn();
+
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0,
+    "a bridge outage turned into a 30-second full-republish loop on the Cerbo");
+});
+
+test("a republished held state is not an ignition", () => {
+  // While the bridge is down its state path only ever repeats what it was already holding,
+  // and a rising edge is the only ignition this controller ever sees. A repeat is not one.
+  const { mod, calls } = loadRelease();
+  clockAt(Date.now());
+  heardEverything(mod);
+  boiler(mod, true);          // the boiler was alight when the bridge went
+  bridge(mod, true);
+  calls.length = 0;
+
+  bridge(mod, false);
+  boiler(mod, true);          // the held value, handed back by the next republish
+  boiler(mod, true);
+
+  assert.deepStrictEqual(calls.filter((c) => c.method === "KVS.Set"), [],
+    "a republish of the held state was written down as a burn");
+});
+
+test("a boiler that lit during the outage is an ignition observed late", () => {
+  // The state only changes when dbus-froeling can read the boiler again, so a change is a
+  // real one, arriving late. Every ignition moves the same augers, whenever it is seen.
+  const { mod, calls } = loadRelease();
+  clockAt(Date.now());
+  heardEverything(mod);
+  bridge(mod, true);
+  mod.state.lastIgnition = Date.now() - (20 * DAYS);
+  bridge(mod, false);
+  calls.length = 0;
+
+  bridge(mod, true);
+  boiler(mod, true);
+
+  assert.strictEqual(calls.filter((c) => c.method === "KVS.Set").length, 1,
+    "a burn that happened while the bridge was away reset nothing");
+});
+
+test("the status line says the boiler is unreadable rather than unknown", () => {
+  const { mod } = loadRelease();
+  heardEverything(mod);
+  bridge(mod, false);
+
+  assert.ok(statusText(mod).indexOf("Boiler unreadable") >= 0, statusText(mod));
 });
 
 test("the first republish request waits for the subscriptions to land", () => {

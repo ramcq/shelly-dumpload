@@ -121,6 +121,13 @@ its own. An unreachable Heat Pump Enable costs the immersions the shortage shed 
 else, which is the immersion floor.
 _Avoid_: Fallback, default, degraded mode
 
+**Held reading**:
+A value that keeps arriving and keeps looking fresh but is no longer being measured, because
+whoever publishes it is deliberately repeating the last one — `dbus-froeling` over a dropped
+Modbus link. Only the service's `/Connected` tells it from a live reading. Distinct from a
+**stale** reading, which is one nobody has refreshed.
+_Avoid_: Cached, last-known-good, sticky
+
 **Self-announcing**:
 A signal whose value keeps arriving whether or not anything has changed, because the reading
 itself drifts — any Shelly PM channel, which republishes every 20–30 seconds on power and

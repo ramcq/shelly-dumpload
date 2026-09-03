@@ -61,6 +61,8 @@ const EXPORTED = [
   "localHourText",
   "guardTemperature",
   "guardSatisfied",
+  "bridgeIsDown",
+  "bufferUnreadable",
   "currentWindowKey",
   "updateWindow",
   "updateWindowGuard",

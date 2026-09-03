@@ -393,6 +393,8 @@ flow ≥ 60 °C**, whichever is higher. Both are needed: buffer top measures the
 stored but lags ignition by 10–15 minutes, while boiler flow (Fröling register `30001`,
 reaching Victron as `temperature/103`) is the earliest honest signal and matches the
 hydraulics, but cools when the boiler stops even with 1500 litres of heat in the buffer.
+Where neither can be read at all, the window runs without them — see
+[When the Fröling bridge falls over](#when-the-fröling-bridge-falls-over).
 
 **A window is a slot, not a start time.** The guard is checked throughout the hour, so a
 boiler that lifts the buffer past 60 °C at 05:20 still gets a window. Once the enable has
@@ -402,10 +404,8 @@ That is one flag in RAM, cleared with the hour — no timer, no re-arm threshold
 A late guard gets a short run, which is accepted.
 
 **Two windows that touch are one window.** An entry window running into 05:00 carries the
-flag across: the top of an hour a window was already open through is not a reason to shut
-the valves. Nothing chains beyond that, because the flag is cleared the moment there is no
-window at all — so a flag still set at a change of hour can only have come from the hour
-before it.
+flag across, since the top of an hour a window was already open through is no reason to shut
+the valves. Nothing chains beyond that: the flag is cleared whenever there is no window.
 
 **The time clock takes authority.** `Switch.Set` overrides `follow` until the next input edge,
 so the controller reads its own input and never opens the enable while the clock is calling: a
@@ -425,6 +425,41 @@ it moves no energy and merely runs the heat loop pump, mixing the buffer that
 Nothing arbitrates between DHW and the heating circuits, since the Grant does not know DHW
 exists. On a marginal buffer, let DHW win: cold water is noticed in hours, a slightly cooler
 house is not.
+
+---
+
+## When the Fröling bridge falls over
+
+When `dbus-froeling` loses its Modbus connection it **holds the last value and sets
+`/Connected` to 0** rather than invalidating the reading — deliberately, since a transient
+error that showed the boiler stopping and restarting would read as an ignition.
+
+So the value topics go quiet holding a number that still looks fresh, and every controller
+that reads a Fröling path reads `/Connected` too, at the point of use rather than as an
+event: a controller that merely forgot its reading would take the next republish burst for a
+fresh one, the more certainly for being what asked for the burst. One path answers for all
+four services, which share a Modbus client and fail together, and it is a silent signal, so
+it is asked for with the keepalive like `vebus/276/State` beside it.
+
+An invalid value reaches MQTT as `{"value": null}`, which is what the paths publish before
+their first successful read. Every controller already ignores a null rather than reading it
+as zero, leaving the reading in its never-heard state, so that case needs no second rule.
+
+| Controller | Blind behaviour |
+|---|---|
+| `thermal-dump-controller.js` (.156) | Suppresses — fan coil and pump off. Recovering waste heat is an optimisation, and burning wood to feed a fan coil is the outcome worth suppressing for |
+| `heating-relay-controller.js` (.164) | The exercise run goes inert, which is what an unavailable boiler input already costs. Its other rungs never read the Fröling |
+| `dhw-controller.js` (.123) | Runs its window **unguarded** |
+
+**DHW degrades towards doing more rather than less.** Losing the reading does not make a cold
+buffer any less likely to strip heat out of the cylinders, but it does not make the hot water
+less wanted either, and in shortage the buffer is the only route to it. So the window keeps
+to its slots and drops the temperature term — the same judgement as letting DHW win on a
+marginal buffer. Being wrong costs the heat loop pump and a cool cylinder staying cool.
+
+It does not check that the boiler has been released. .164 releases on the same shortage that
+opens the window, so a second copy of that decision here would exclude nothing and cost a
+subscription; the heating relay is where that rung lives.
 
 ---
 
@@ -526,7 +561,7 @@ or the lead relay closed for its own reasons without giving up the hardware path
 | `soc-relay-controller.js` | .209 | existing, reconfigured | Express shortage on its relay; no dump load gates | Written |
 | `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; shed while it is open, time switch included | Written |
 | `heating-relay-controller.js` | .164 | new | H1; DHW demand; the power system, VE.Bus before the lock; exercise run | Written |
-| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | The time clock, then shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status and lose the buffer bottom and the boiler input | Written |
+| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | The time clock, then shortage DHW windows, unguarded where the bridge has failed; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status and lose the buffer bottom and the boiler input | Written |
 
 .209 runs the same file as the four DHW immersions. They share the shortage rule, and above
 it the proven MQTT, keepalive and re-entrancy code, so one file is the honest arrangement:
@@ -600,9 +635,10 @@ restarting during a hot water window ignores the time switch until the clock nex
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under
 it. So the topic sets stay deliberately small: the immersions run seven — five Victron
-paths, the lead relay's input and .209's switch — .209 runs five, .164 runs four: the lock,
-the DHW time clock, `vebus/276/State` and the boiler input, and .123 runs three: the lock,
-the buffer top and the boiler flow. Following the lock rather than deriving it is what keeps
-them there; deriving it would have cost each of them SOC, both generation figures and the
-inverter output — the four paths the terms rest on — which would have put .164 at eight and
-.123 at seven.
+paths, the lead relay's input and .209's switch — .209 runs five, .164 runs five: the lock,
+the DHW time clock, `vebus/276/State`, the boiler input and the bridge behind it, and .123
+runs four: the lock, the buffer top, the boiler flow and the bridge behind the last two. The
+thermal dump runs eight. Following the lock rather than deriving it is what
+keeps them there; deriving it would have cost each of them SOC, both generation figures and
+the inverter output — the four paths the terms rest on — which would have put .164 at nine
+and .123 at nine.

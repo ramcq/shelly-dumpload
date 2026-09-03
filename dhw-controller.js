@@ -2,28 +2,14 @@
 // Copyright (c) 2025-2026 Robert McQueen
 //
 // DHW Controller for Shelly 1 Mini Gen3 - DHW Enable (192.168.1.123)
-// Closes the DHW enable, which is permission for heat to move from the buffer into the
-// cylinders. Permission, not a command: the three cylinder thermostats decide whether
-// anything actually moves, which is why nothing here senses cylinder temperature. Close the
-// enable and a cool cylinder loads itself; a hot one does nothing.
+// Permits heat to move from the buffer into the cylinders. The cylinder stats decide whether
+// any actually does, so nothing here senses cylinder temperature.
 //
-// One ladder, first match wins:
-//   1. The time clock  - this relay's own input, unconditionally. No reference to buffer
-//                        temperature, the heat pump, or anything arriving over MQTT: the
-//                        switch says heat, so heat. Hardware `follow` answers it without
-//                        this script, and this rung is what stops the script undoing it
-//   2. A shortage DHW  - in shortage the heat pump is locked and the immersion time switch
-//      window            is blocked, so the buffer is the only route to hot water. The
-//                        controller runs the time clock the user would otherwise turn on by
-//                        hand: one hour in six, guarded by buffer temperature
+// Ladder, first match wins:
+//   1. The time clock, on this relay's own input, unconditionally
+//   2. A shortage DHW window: one hour in six, guarded on buffer temperature
 //
-// Nothing takes DHW from the buffer outside shortage. The immersions make the same water
-// from the same surplus more directly, and an enable that moves no energy still runs the
-// heat loop pump and mixes a buffer `thermal-dump-controller.js` needs stratified.
-//
-// A window permits heat that is already there and asks for none, so it is not DHW demand
-// and releases no boiler. .164 reads this device's *input* for that, never its relay.
-// See CONTROLS.md.
+// Rules and reasoning in CONTROLS.md#dhw.
 
 // ===== Configuration =====
 let config = {
@@ -35,20 +21,14 @@ let config = {
     reconnectDelay: 5000 // ms to wait before reconnection attempt
   },
 
-  // The one device this file belongs on, matched on the ID it reports at startup. .164 is
-  // next door in the same cupboard and its relay looks identical, so a misdirected deploy
-  // is a thing to survive rather than to guess at: an unrecognised device runs nothing, and
-  // a guess here would burn wood.
+  // .164 is next door and its relay looks identical, so an unrecognised device runs nothing.
   device: {
     id: "48f6ee8e8780",
     name: "DHW Enable"
   },
 
-  // The heat pump lock (.209). Closed means the heat pump is running, open means the system
-  // is short. This controller follows it rather than deriving shortage from the power
-  // system, which would cost SOC, both generation figures and the inverter output on top of
-  // the inverter state - four subscriptions and a second copy of 30/90/500, for a script
-  // whose job is moving heat between vessels.
+  // Closed means the heat pump is running, open means shortage. Followed rather than
+  // derived - see ADR 0001.
   heatPumpLock: {
     statusTopic: "shelly1minig3-d885ac0a3668/status/switch:0",
     commandTopic: "shelly1minig3-d885ac0a3668/command"
@@ -57,30 +37,26 @@ let config = {
   // The shortage DHW window: when the controller may close the enable in place of the time
   // clock, and what has to be true of the buffer before it does.
   window: {
-    // One hour in six, local time, as the device reports the hour: two characters, leading
-    // zero and all. Fixed times need no anchor to persist and so survive a reboot with
-    // nothing written down. One in six rather than the two in twelve the physical clock
-    // would use, because a window need not finish a charge: a partial one resumes six hours
-    // later, and the annex cylinder is small enough that one shower empties it.
+    // Local time, as sys.time reports the hour: two characters, leading zero and all.
     slotHours: ["05", "11", "17", "23"],
 
-    // A shortage beginning at 07:30 should not wait until noon for its first hot water, so
-    // entering shortage is a window of its own. An interval rather than a time, which is
-    // why it needs no synchronised clock.
+    // The window on entering shortage. An interval, so it needs no synchronised clock.
     entryWindowLength: 60 * 60 * 1000,
 
-    // The cylinder stats know nothing about the primary side, so a window on a cold buffer
-    // circulates through the coils and strips heat back *out* of the cylinders. Buffer top
-    // or boiler flow, whichever is higher: top measures the energy actually stored but lags
-    // ignition by 10-15 minutes, while flow is the earliest honest signal and matches the
-    // hydraulics but cools when the boiler stops even with 1500 litres of heat behind it.
+    // A window on a cold buffer strips heat back out of the cylinders. Buffer top or boiler
+    // flow, whichever is higher.
     minBufferTemp: 60
   },
 
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
     bufferTop: "temperature/100/Temperature",  // Buffer top, from dbus-froeling
-    boilerFlow: "temperature/103/Temperature"  // Fröling register 30001, Kesseltemperatur
+    boilerFlow: "temperature/103/Temperature", // Fröling register 30001, Kesseltemperatur
+
+    // The bridge holds its last temperature when modbus drops, so a held reading keeps
+    // arriving and keeps looking fresh; this is the only thing that says otherwise. One path
+    // for both, since all four of its services fail together.
+    froelingConnected: "temperature/100/Connected"
   },
 
   // Virtual component IDs
@@ -110,6 +86,8 @@ let state = {
 
   // Device identity
   startedAt: Date.now(),
+  listeningSince: Date.now(),  // Script start, and every reconnect after it: a drop empties
+                               // the readings as thoroughly as a restart does
   identityKnown: false,      // Whether this is the device the file is written for
   deviceName: "",
 
@@ -121,26 +99,20 @@ let state = {
   // The heat pump lock, as published by .209. Kept across a broker drop: silence is not
   // .209 saying the battery recovered.
   lockIsClosed: false,       // Closed means the heat pump is running: no shortage
-  lockKnown: false,          // Never having heard opens no window, so an undeployed or
-                             // unreachable .209 leaves the time clock in hardware and
-                             // nothing else
+  lockKnown: false,          // Never having heard opens no window
 
-  // The buffer, from the Fröling by way of dbus-froeling. Both are self-announcing - they
-  // arrive every few seconds whether or not they have moved - so a drop clears them: the
-  // silence means this controller cannot see the buffer, not that the buffer stopped.
   bufferTop: 0,
   bufferTopReceived: false,
   boilerFlow: 0,
   boilerFlowReceived: false,
 
-  // The window in progress. A key rather than a deadline, because a slot is a slot: the
-  // scheduled ones are identified by the hour they start, the entry one by being the entry
-  // one, and the latch belongs to whichever is open.
-  windowKey: "",
-  windowLatched: false,      // Whether the enable has closed within this window. Once it
-                             // has it stays closed until the window ends, or a burn
-                             // finishing mid-window shuts the zone valves and a buffer
-                             // hovering at 60 degC cycles three actuators
+  bridgeConnected: true,     // Absent, no claim either way
+  bridgeConnectedReceived: false,
+
+  windowKey: "",             // Which window is open: the hour it starts, or "entry"
+  windowBlind: false,        // Whether it latched with no buffer reading behind it
+  windowLatched: false,      // The enable has closed within this window, so it stays closed
+                             // until the window ends
   entryWindowUntil: 0,       // ms, Date.now() - an interval within this run, not a time
 
   // Timer
@@ -168,16 +140,9 @@ function arrayContains(array, value) {
   return false;
 }
 
-// The local wall-clock hour as the device writes it - "05", "17" - or "" where there is
-// none to trust. The scheduled slots are times of day rather than intervals, so they are the
-// one thing here that needs a clock the device did not invent: `sys.time` is null until the
-// device has actually reached an NTP server, and a device that has never synchronised still
-// reports a plausible-looking date, which is the dangerous shape of wrong. Without one there
-// are no scheduled slots at all; the entry window is an interval and works regardless.
-//
-// Compared as text rather than parsed to a number, because the slots are known strings and
-// `sys.time` is documented to carry the leading zero: nothing here has to decide what "08"
-// is worth.
+// The local hour as sys.time writes it - "05", "17" - or "" where there is no synchronised
+// clock, which leaves no scheduled slots. Compared as text, so nothing has to decide what
+// "08" is worth.
 function localHourText() {
   let sys = Shelly.getComponentStatus("sys");
 
@@ -188,10 +153,7 @@ function localHourText() {
   return sys.time.substring(0, 2);
 }
 
-// Resolve whether this is the device the file is written for. Everything it commands is one
-// relay, so guessing is not an option a misdirected deploy recovers from: an unrecognised
-// device runs nothing at all and leaves the relay in the unscripted behaviour its
-// configuration gives, which for .123 is the time clock passing straight through.
+// An unrecognised device runs nothing, leaving the time clock passing through in hardware.
 function determineDeviceIdentity() {
   let info = Shelly.getDeviceInfo();
 
@@ -209,10 +171,18 @@ function determineDeviceIdentity() {
 
 // ===== The window =====
 
-// The hotter of the two buffer readings, or null where neither has arrived. Zero is a
-// reading nobody sent, and reading it as a cold buffer would be the same mistake in the
-// safe direction rather than an honest answer.
+// Never having heard is not a claim either way.
+function bridgeIsDown() {
+  return state.bridgeConnectedReceived && !state.bridgeConnected;
+}
+
+// The hotter of the two, or null where there is none to be had. Zero is a reading nobody
+// sent, and a value the bridge is holding over a dead link is not a reading either.
 function guardTemperature() {
+  if (bridgeIsDown()) {
+    return null;
+  }
+
   let hottest = null;
 
   if (state.bufferTopReceived) {
@@ -232,10 +202,23 @@ function guardSatisfied() {
   return hottest !== null && hottest >= config.window.minBufferTemp;
 }
 
-// Which window this moment falls in, or "" for none. Shortage first, because that is what a
-// window is *for*: outside it the immersions make the same water from the same surplus more
-// directly. A scheduled slot outranks the entry window, so the two overlapping report one
-// key rather than alternating.
+// Being told is immediate; silence waits out the grace, since a controller that has just
+// connected has readings still in flight - .164 answers a directed request well before the
+// Cerbo's republish arrives.
+function bufferUnreadable() {
+  if (bridgeIsDown()) {
+    return true;
+  }
+
+  if (guardTemperature() !== null) {
+    return false;
+  }
+
+  return Date.now() - state.listeningSince >= config.startupGrace;
+}
+
+// Which window this moment falls in, or "" for none. A scheduled slot outranks the entry
+// window, so two overlapping report one key rather than alternating.
 function currentWindowKey() {
   if (!state.lockKnown || state.lockIsClosed) {
     return "";
@@ -254,8 +237,7 @@ function currentWindowKey() {
   return "";
 }
 
-// Move the latch to the window this moment is in. Called before the ladder is read, so that
-// what the ladder and the status line see is the same window.
+// Move the latch to the window this moment is in, before the ladder reads it.
 function updateWindow() {
   let key = currentWindowKey();
 
@@ -267,41 +249,41 @@ function updateWindow() {
     console.log("Shortage DHW window " + state.windowKey + " ended");
     state.windowKey = "";
     state.windowLatched = false;
+    state.windowBlind = false;
     return;
   }
 
-  // The latch survives a change of key, and only because it is cleared the moment there is
-  // no window at all: still set here means the previous check was inside one, so the two
-  // touch and are one continuous window. An entry window running into 05:00 is the case,
-  // and shutting the valves at the top of an hour it was already open through would be the
-  // very cycling the latch exists to prevent.
+  // The latch carries across a change of key, because it is cleared whenever there is no
+  // window at all: still set here means the two windows touch and are one.
   console.log("Shortage DHW window " + key + " open" +
              (state.windowLatched ? " (continuing)" : ""));
   state.windowKey = key;
 }
 
-// The guard, checked throughout the hour rather than at the top of it - a boiler that lifts
-// the buffer past 60 degC at 05:20 still gets a window, and a late guard gets a short run,
-// which is accepted. Once it has passed the answer latches for the rest of the window: one
-// flag in RAM, cleared with the window, with no timer, no re-arm threshold and no
-// hysteresis.
-//
-// Runs after updateWindow(), and only from the poll, which is what makes the latch mean what
-// it says: the check that sets it is the check that closes the enable. Latching anywhere
-// else - on the lock's own edge, say - would record a guard that had passed up to a poll
-// before the relay moved, and a buffer can fall through 60 degC in between.
+// The guard, checked throughout the hour rather than at the top of it, and latched once it
+// passes. Runs after updateWindow() and only from the poll, so the check that sets the latch
+// is the check that closes the enable.
 function updateWindowGuard() {
   if (state.windowKey === "" || state.windowLatched) {
     return;
   }
 
-  if (!guardSatisfied()) {
+  if (guardSatisfied()) {
+    state.windowLatched = true;
+    state.windowBlind = false;
+    console.log("Shortage DHW window " + state.windowKey + " guarded at " +
+               guardTemperature().toFixed(1) + " degC - the buffer has something to give");
     return;
   }
 
-  state.windowLatched = true;
-  console.log("Shortage DHW window " + state.windowKey + " guarded at " +
-             guardTemperature().toFixed(1) + " degC - the buffer has something to give");
+  // Make hot water anyway: in shortage the buffer is the only route to it, and .164
+  // releases the boiler on the same shortage. The slots still bound it.
+  if (bufferUnreadable()) {
+    state.windowLatched = true;
+    state.windowBlind = true;
+    console.log("Shortage DHW window " + state.windowKey +
+               " running blind - no buffer reading");
+  }
 }
 
 // Whether the window in progress permits the enable.
@@ -309,21 +291,17 @@ function windowOpen() {
   return state.windowKey !== "" && state.windowLatched;
 }
 
-// The ladder. The first rung that matches closes the enable and the rest are moot, since the
-// relay has only one position to be in.
-//
-// The time clock is first because it takes authority: a Switch.Set overrides `follow` until
-// the next input edge, so a controller that read its own input second would open an enable
-// the user asked for at 05:30 the moment its window expired at 06:00. It is also the rung
-// that must keep working with the Cerbo down, the Fröling stale or the network broken, so
-// nothing above it may depend on any of them.
+// The ladder. The clock is first because a Switch.Set overrides `follow` until the next input
+// edge: reading it second would open an enable the user asked for the moment a window
+// expired under it. It is also the rung that must work with the Cerbo down.
 function enableReason() {
   if (state.inputIsActive) {
     return "time clock";
   }
 
   if (windowOpen()) {
-    return "shortage DHW window (" + state.windowKey + ")";
+    return "shortage DHW window (" + state.windowKey +
+           (state.windowBlind ? ", blind" : "") + ")";
   }
 
   return "";
@@ -333,33 +311,35 @@ function enableReason() {
 function updateStatus(event) {
   let relayPart = state.deviceName + (state.relayIsOn ? " ON" : " OFF");
 
-  // None of the lock or the two temperatures has a value until it arrives, and an initial
-  // value reported as a reading is an invented one. The lock is the silent one of the three
-  // and may be months away; the temperatures are only seconds off.
+  // An initial value reported as a reading is an invented one.
   let lockPart = ", HP " + (!state.lockKnown
     ? "?"
     : (state.lockIsClosed ? "Enabled" : "Locked"));
 
-  let bufferPart = ", Buffer " + (!state.bufferTopReceived
+  // A held value is shown as no reading, because that is what it is.
+  let blindBridge = bridgeIsDown();
+  let bufferPart = ", Buffer " + ((!state.bufferTopReceived || blindBridge)
     ? "?"
     : state.bufferTop.toFixed(1) + "C");
-  let flowPart = ", Flow " + (!state.boilerFlowReceived
+  let flowPart = ", Flow " + ((!state.boilerFlowReceived || blindBridge)
     ? "?"
     : state.boilerFlow.toFixed(1) + "C");
+  let bridgePart = blindBridge ? ", Fröling unreadable" : "";
 
   let clockPart = ", Clock " + (state.inputIsActive ? "ON" : "OFF");
 
   let windowPart = ", Window " + (state.windowKey === ""
     ? "-"
-    : state.windowKey + (state.windowLatched ? " held" : " waiting"));
+    : state.windowKey + (state.windowLatched ? " held" : " waiting") +
+      (state.windowBlind ? " (blind)" : ""));
 
   let reason = enableReason();
   let enabledPart = reason !== "" ? ", Enabled: " + reason : "";
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = relayPart + lockPart + bufferPart + flowPart + clockPart +
-                      windowPart + enabledPart + eventPart;
+  let statusMessage = relayPart + lockPart + bufferPart + flowPart + bridgePart +
+                      clockPart + windowPart + enabledPart + eventPart;
 
   logDebug("Status: " + statusMessage);
 
@@ -465,9 +445,8 @@ function setupEventHandlers() {
         return;
       }
 
-      // Something else moved the contact, and on this relay that something is usually the
-      // hardware: `follow` reasserts itself on a time clock edge, so a clock going off opens
-      // a relay a window may still want closed.
+      // Usually the hardware: `follow` reasserts on a clock edge, opening a relay a window
+      // may still want closed.
       state.relayIsOn = newState;
       state.intendedRelayOn = newState;
       logDebug("Relay state changed externally to: " + newState);
@@ -490,9 +469,7 @@ function processMqttMessage(topic, message) {
   }
 
   try {
-    // The heat pump lock, which is the whole of what this controller knows about the power
-    // system. Its opening edge is also the entry window: a shortage beginning at 07:30
-    // should not wait until noon for its first hot water.
+    // The lock. Its opening edge is also the entry window.
     if (topic === config.heatPumpLock.statusTopic) {
       let payload = JSON.parse(message);
       if (payload.output !== undefined) {
@@ -505,19 +482,14 @@ function processMqttMessage(topic, message) {
           console.log("Heat pump lock " +
                      (state.lockIsClosed ? "closed - no shortage" : "open - SHORTAGE"));
 
-          // Only an edge, never a republish of what was already held: .209 republishes its
-          // whole status on every reconnect, and this window is for a shortage that has
-          // just begun. A restart mid-shortage is an edge as far as this controller can
-          // tell, which costs at most one extra guarded hour.
+          // An edge only - .209 republishes its whole status on every reconnect. A restart
+          // mid-shortage reads as one, costing at most an extra guarded hour.
           if (!state.lockIsClosed) {
             state.entryWindowUntil = Date.now() + config.window.entryWindowLength;
             console.log("Opening a DHW window for the next hour");
           }
 
-          // Before the status line rather than after it: shortage is what a window is made
-          // of, so a lock that has just moved leaves the previous window's key describing a
-          // window that no longer exists. The key only - the guard and the relay are both
-          // the poll's business, and in that order.
+          // The key only: the guard and the relay are the poll's business.
           updateWindow();
           updateStatus("Heat pump lock changed");
         }
@@ -547,6 +519,21 @@ function processMqttMessage(topic, message) {
       state.boilerFlow = parseFloat(payload.value);
       state.boilerFlowReceived = true;
     }
+
+    // Read at the point of use, never acted on here: the bridge keeps publishing its held
+    // values, so a controller that forgot them would take the next republish for a reading.
+    if (relativeTopic === config.topics.froelingConnected) {
+      let wasConnected = state.bridgeConnected;
+      let wasKnown = state.bridgeConnectedReceived;
+      state.bridgeConnected = (parseInt(payload.value) === 1);
+      state.bridgeConnectedReceived = true;
+
+      if (!wasKnown || wasConnected !== state.bridgeConnected) {
+        console.log("Fröling bridge " + (state.bridgeConnected
+          ? "reading the boiler again"
+          : "cannot read the boiler - the buffer temperatures are held, not live"));
+      }
+    }
   } catch (e) {
     console.log("Error processing MQTT message: " + e.message);
   }
@@ -555,6 +542,9 @@ function processMqttMessage(topic, message) {
 function handleMqttConnected() {
   console.log("Connected to MQTT broker");
   state.mqttConnected = true;
+
+  // Where the wait for a reading fairly begins, on a reconnect as much as the first one.
+  state.listeningSince = Date.now();
 
   let topicPrefix = "N/" + config.cerbo.portalId + "/";
   for (let key in config.topics) {
@@ -573,26 +563,21 @@ function handleMqttConnected() {
     requestFollowedStatus(true);
   });
 
-  // Both buffer readings are self-announcing, so the full republish is only needed until
-  // they have first arrived. The lock is not, and is asked for separately below.
+  // The temperatures are self-announcing; the bridge state is not, and decides whether they
+  // mean anything. The lock is Shelly status, asked for below.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(state.bufferTopReceived && state.boilerFlowReceived);
+    sendKeepalive(state.bufferTopReceived && state.boilerFlowReceived &&
+                  state.bridgeConnectedReceived);
     requestFollowedStatus(false);
   });
 }
 
-// Shelly publishes status on change and does not retain it, so a follower that has just
-// started believes nothing at all until the lock next moves - which, for a relay that
-// changes a handful of times a year, may be months. `status_update` on .209's command topic
-// makes it republish every component on the topic this controller already subscribes to, so
-// asking costs no extra subscription and no HTTP.
-//
-// Asked on connect, and again on every keepalive until the answer arrives, since the request
-// is as losable as the answer. Forced on connect, because the lock may have moved while the
-// broker was away and .209 will not repeat it.
+// Shelly status is published on change and not retained, so a follower asks rather than
+// waits - see README, Seeding State From Other Devices. Forced on connect, since the lock
+// may have moved while the broker was away.
 function requestFollowedStatus(force) {
   if (force || !state.lockKnown) {
     MQTT.publish(config.heatPumpLock.commandTopic, "status_update", 1, false);
@@ -619,16 +604,16 @@ function sendKeepalive(suppressRepublish) {
   logDebug("Sent keepalive" + (suppressRepublish ? " (suppress-republish)" : ""));
 }
 
-// What a drop does to a flag differs by what the value is for. The buffer readings are
-// self-announcing - they arrive every few seconds whether or not they have moved - so
-// silence means this controller cannot see the buffer, and a guard is not passed on a
-// reading it no longer has. The lock is kept, because silence is not .209 saying the battery
-// recovered, and forgetting it would end a window on a broker blip.
+// The buffer readings go, since they may have changed unseen. The lock is kept: silence is
+// not .209 saying the battery recovered.
 function resetMqttData() {
   state.bufferTop = 0;
   state.bufferTopReceived = false;
   state.boilerFlow = 0;
   state.boilerFlowReceived = false;
+
+  state.bridgeConnected = true;
+  state.bridgeConnectedReceived = false;
 
   logDebug("Reset MQTT data due to disconnection");
 }
@@ -661,9 +646,8 @@ function ensureMqttConfig() {
     needsConfig = true;
     logDebug("MQTT server doesn't match, reconfiguring");
   } else if (mqttConfig.status_ntf === false) {
-    // .164 reads this device's input for its DHW demand rung, so notifications off is a
-    // time clock whose call never leaves the cupboard. Tested for false, not for not-true:
-    // a firmware without the key must not reboot on every start.
+    // .164 reads this device's input, so notifications off is a clock nobody hears. Tested
+    // for false, not not-true: a firmware without the key must not reboot on every start.
     needsConfig = true;
     logDebug("MQTT status notifications are off, reconfiguring");
   }
@@ -748,8 +732,7 @@ function updateDeviceState() {
     }
   }
 
-  // The DHW time clock, wired to this relay's input, which `follow` already acts on:
-  // reading it here is how the script knows not to undo that.
+  // The time clock, which `follow` already acts on: read here so the script does not undo it.
   let inputStatus = Shelly.getComponentStatus("input:0");
   if (inputStatus && inputStatus.state !== undefined) {
     if (state.inputIsActive !== inputStatus.state) {
@@ -804,9 +787,7 @@ function turnRelayOff(reason) {
   );
 }
 
-// Which followed readings have never arrived. Every one of them is a term of the window, and
-// the lock is silent between transitions while the temperatures are only seconds away, so a
-// fresh start has none of them.
+// Followed readings that have never arrived, each of which could justify a closed relay.
 function outstandingReadings() {
   let missing = [];
 
@@ -836,9 +817,8 @@ function checkSystemState() {
 
   let reason = enableReason();
 
-  // A relay already where it should be is not commanded. That matters most for the time
-  // clock, which hardware `follow` has already answered: a Switch.Set overrides follow until
-  // the next input edge, and there is nothing to gain by taking that over.
+  // A relay already where it should be is not commanded: a Switch.Set would take `follow`
+  // over until the next input edge for nothing.
   if (reason !== "") {
     if (!state.relayIsOn) {
       turnRelayOn(reason);
@@ -850,10 +830,8 @@ function checkSystemState() {
     return;
   }
 
-  // Nothing asking is not the same as nothing having answered. A restart finds the contact
-  // wherever the last run left it, and every reading that could justify it arrives over MQTT
-  // some time later, so an incomplete picture waits rather than shutting the zone valves on
-  // a live window at every redeploy. Past the grace, silence is taken at face value.
+  // A restart finds the contact where the last run left it, so an incomplete picture waits
+  // rather than shutting the zone valves on a live window. Past the grace, silence counts.
   let outstanding = outstandingReadings();
 
   if (outstanding !== "" && Date.now() - state.startedAt < config.startupGrace) {

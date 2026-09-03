@@ -132,8 +132,9 @@ The canonical list. Correct it here and nowhere else.
 | `evcharger/40` | EV charging station | Modbus TCP |
 | `generator/0` | Generator start/stop | See above |
 | `tank/20`, `/21` | Diesel, water | |
-| `temperature/100`, `/101`, `/103` | Buffer top, buffer bottom, boiler flow | From `dbus-froeling` |
-| `digitalinput/102` | Boiler operating contact | `FurnaceStatus`, from `dbus-froeling` |
+| `temperature/100`, `/101`, `/103` | Buffer top, buffer bottom, boiler flow | From `dbus-froeling`. On a lost Modbus link the value is held and `/Connected` goes to 0 — see [CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over) |
+| `digitalinput/102` | Boiler operating contact | `FurnaceStatus`, from `dbus-froeling`. Held with `/Connected` at 0 on a lost Modbus link, as the temperatures are |
+| `digitalinput/104` | Kesselfreigabe release contact | The Fröling's own view of what .164 drives, from `dbus-froeling` |
 
 Every Shelly is registered with `dbus-shelly-local`. Two-channel devices take one instance
 per channel, and the instance order is **not** the channel order:
