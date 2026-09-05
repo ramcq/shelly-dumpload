@@ -15,18 +15,18 @@ The division of labour across the documentation:
 | [CONTEXT.md](CONTEXT.md) | The vocabulary every document here uses |
 | [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
 
-**Status.** The dump load side is live and has been for months. On the heating side the
-heat pump lock is written, the immersions shed with it, and the biomass release follows it;
-the DHW enable is designed and not yet written.
+**Status.** Everything in this document is deployed. The dump load side has been live for
+months; the heating side — the heat pump lock, the immersions shedding with it, the biomass
+release and the DHW enable — is newly so.
 
 | Behaviour | State |
 |---|---|
 | DHW immersions on SOC thresholds, with a manual time switch | Live |
 | Buffer immersions tracking surplus | Live |
 | Thermal recovery from stalled buffer immersions | Live |
-| Shortage, the heat pump lock and the immersions shedding with it | Written, not yet deployed |
-| Biomass release — H1, DHW demand, sustained shortage, exercise run | Written, not yet deployed |
-| DHW enable | **Designed only** |
+| Shortage, the heat pump lock and the immersions shedding with it | Live |
+| Biomass release — H1, DHW demand, sustained shortage, exercise run | Live |
+| DHW enable — the time clock, and shortage windows one hour in six | Live |
 
 ---
 
@@ -179,7 +179,7 @@ running, relay open means shortage. No retained flag, no second copy of a thresh
 is what it actually wants to know: the biomass supplements when the heat pump is not running,
 and DHW comes from the buffer when the heat pump cannot make it. That keeps the heating side
 out of the power system entirely — the shortage rule needs four Victron subscriptions, and
-.123 would have reached eight of Shelly's ten carrying them, for a script whose job is moving
+.123 would have reached seven of Shelly's ten carrying them, for a script whose job is moving
 heat between vessels.
 
 It also makes manual control a first-class operation. Stop .209's script, put its relay where
@@ -397,9 +397,15 @@ hydraulics, but cools when the boiler stops even with 1500 litres of heat in the
 **A window is a slot, not a start time.** The guard is checked throughout the hour, so a
 boiler that lifts the buffer past 60 °C at 05:20 still gets a window. Once the enable has
 closed within a slot it stays closed until the slot ends: otherwise a burn finishing
-mid-window slams the zone valves shut, and a buffer hovering at 60 °C cycles three actuators.
+mid-window shuts the zone valves, and a buffer hovering at 60 °C cycles three actuators.
 That is one flag in RAM, cleared with the hour — no timer, no re-arm threshold, no hysteresis.
 A late guard gets a short run, which is accepted.
+
+**Two windows that touch are one window.** An entry window running into 05:00 carries the
+flag across: the top of an hour a window was already open through is not a reason to shut
+the valves. Nothing chains beyond that, because the flag is cleared the moment there is no
+window at all — so a flag still set at a change of hour can only have come from the hour
+before it.
 
 **The time clock takes authority.** `Switch.Set` overrides `follow` until the next input edge,
 so the controller reads its own input and never opens the enable while the clock is calling: a
@@ -520,7 +526,7 @@ or the lead relay closed for its own reasons without giving up the hardware path
 | `soc-relay-controller.js` | .209 | existing, reconfigured | Express shortage on its relay; no dump load gates | Written |
 | `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; shed while it is open, time switch included | Written |
 | `heating-relay-controller.js` | .164 | new | H1; DHW demand; the power system, VE.Bus before the lock; exercise run | Written |
-| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | Shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status | To do |
+| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | The time clock, then shortage DHW windows; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status and lose the buffer bottom and the boiler input | Written |
 
 .209 runs the same file as the four DHW immersions. They share the shortage rule, and above
 it the proven MQTT, keepalive and re-entrancy code, so one file is the honest arrangement:
@@ -594,14 +600,9 @@ restarting during a hot water window ignores the time switch until the clock nex
 Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
 rather than degrading it — see [README.md](README.md) for the number and how to stay under
 it. So the topic sets stay deliberately small: the immersions run seven — five Victron
-paths, the lead relay's input and .209's switch — .209 runs five, and .164 runs four: the
-lock, the DHW time clock, `vebus/276/State` and the boiler input. Following the lock rather
-than deriving it is what keeps .164 at four and .123 at five; deriving it would have cost
-each of them SOC, both generation figures and the inverter output — the four paths the terms
-rest on — which would have put .164 at eight and .123 at nine.
-
-### Prerequisites
-
-- **Add register `30001`** (Kesseltemperatur, ÷2) to `dbus-froeling` as a third temperature
-  service. Buffer top, buffer bottom and furnace status are already published; boiler flow is
-  the one addition the DHW gate needs.
+paths, the lead relay's input and .209's switch — .209 runs five, .164 runs four: the lock,
+the DHW time clock, `vebus/276/State` and the boiler input, and .123 runs three: the lock,
+the buffer top and the boiler flow. Following the lock rather than deriving it is what keeps
+them there; deriving it would have cost each of them SOC, both generation figures and the
+inverter output — the four paths the terms rest on — which would have put .164 at eight and
+.123 at seven.

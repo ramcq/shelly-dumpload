@@ -18,6 +18,9 @@
 # Boiler Release: follows the heat pump lock and the DHW time clock
 192.168.1.110:1:heating-relay-controller.js:Boiler Release
 
+# DHW Enable: the time clock, and shortage DHW windows out of the buffer
+192.168.1.111:1:dhw-controller.js:DHW Enable
+
 # Thermal Dump Controller (1x device)
 192.168.1.104:1:thermal-dump-controller.js:Thermal Dump
 

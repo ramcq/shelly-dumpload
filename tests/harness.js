@@ -57,6 +57,15 @@ const EXPORTED = [
   "recordIgnition",
   "readLastIgnition",
   "outstandingReadings",
+  // dhw-controller
+  "localHourText",
+  "guardTemperature",
+  "guardSatisfied",
+  "currentWindowKey",
+  "updateWindow",
+  "updateWindowGuard",
+  "windowOpen",
+  "enableReason",
   // common
   "setupMqttSubscriptionsAndKeepalive",
   "processMqttMessage",

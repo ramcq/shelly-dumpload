@@ -95,6 +95,11 @@ says which of them may speak. `Shelly.call` records its callback as well as its 
 a test can answer an RPC as the device would, which is what makes "the key has never been
 written" reachable.
 
+`dhw-controller.js` is tested from both directions at once, because its two rungs fail
+oppositely: the time clock must close the enable with nothing else known at all, and a
+window must not open on a buffer reading that has never arrived. Its slots are wall-clock
+times, so `sys` is stubbed with and without a synchronised clock.
+
 ## Scripts Overview
 
 ### soc-relay-controller.js
@@ -385,6 +390,75 @@ four are asked for rather than waited on; see
 
 ---
 
+### dhw-controller.js
+**Device:** Shelly 1 Mini Gen3 (DHW Enable)
+**Purpose:** Permit heat to move from the buffer into the three cylinders
+
+The enable permits and never asks: the cylinder thermostats decide whether anything actually
+moves, which is why nothing here senses cylinder temperature. Close the enable and a cool
+cylinder loads itself; a hot one does nothing. It is not DHW demand and releases no boiler —
+.164 reads this device's *input* for that rung, never its relay.
+
+**The ladder.** Two rungs, first match wins.
+
+| | Rung | Reads | Guarded by |
+|---|---|---|---|
+| 1 | The DHW time clock | its own `input:0` | nothing at all |
+| 2 | A shortage DHW window | .209's switch status, and the local wall clock | buffer top or boiler flow ≥ 60 °C |
+
+**The clock is first because it takes authority.** A `Switch.Set` overrides `follow` until
+the next input edge, so a controller that read its own input second would open an enable the
+user asked for at 05:30 the moment its window expired at 06:00. It is also the rung that has
+to keep working with the Cerbo down, the Fröling stale or the network broken — the user is
+physically asking for hot water — so nothing above it may depend on any of them, and it is
+not weighed against a buffer reading.
+
+**The shortage DHW window:** the rule — one hour in six, in shortage only, guarded on buffer
+temperature — and the reasoning are in [CONTROLS.md](CONTROLS.md#dhw). What this script holds:
+- `config.window.slotHours`, compared against the first two characters of `sys.time` rather
+  than parsed, so nothing here has to decide what "08" is worth. They are wall-clock times, so
+  a device that has never reached an NTP server runs no scheduled slots at all
+- `config.window.entryWindowLength`, the window on entering shortage — an interval rather
+  than a time, and so the one that works without a synchronised clock
+- `config.window.minBufferTemp`, against the higher of buffer top (`temperature/100`) and
+  boiler flow (`temperature/103`), both from `dbus-froeling`. Neither is read as cold before
+  it has arrived, and with only one of them arriving the guard runs on that one alone — on
+  buffer top that means waiting out the lag, on flow it means losing the window when a burn
+  ends
+- `state.windowKey` and `state.windowLatched` — the flag that keeps the enable closed for the
+  rest of a window. It is set once per poll, in the same check that commands the relay, so it
+  never records a guard the enable did not act on, and it carries across two windows that
+  touch because it is cleared the moment there is *no* window. See
+  [Dwell Timers](#dwell-timers) for why it is not one
+
+**A restart** finds the contact wherever the last run left it and nothing written down. A
+relay found closed is left alone while any followed reading is still outstanding — past
+`config.startupGrace`, silence is taken at face value — and a window still justified simply
+re-latches on the guard. One consequence is deliberate: a restart part way through a shortage
+looks like entering one, so it opens an entry window, which costs at most one extra guarded
+hour.
+
+**MQTT Subscriptions:** three — the heat pump lock, buffer top and boiler flow. Following the
+lock rather than deriving shortage is what keeps it there; deriving it would have added SOC,
+both generation figures and the inverter output, for a script whose job is moving heat
+between vessels. See [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
+Both temperatures are self-announcing and the lock is not, so only the lock is asked for; see
+[Seeding State From Other Devices](#seeding-state-from-other-devices).
+
+**Configuration:**
+- One device, matched on the ID it reports at startup. .164 is next door in the same cupboard
+  and its relay looks identical, so an unrecognised device runs nothing at all and leaves the
+  time clock passing through in hardware
+- Requires the relay to be `follow` with `initial_state: "match_input"` — see the relay
+  configuration table in [CONTROLS.md](CONTROLS.md)
+- `sys.time` is what the slots are read from, and it is null until the device has actually
+  reached an NTP server — a clock the device did not invent, as the exercise run needs on .164
+
+**Virtual Components:**
+- `text:200` - Status display
+
+---
+
 ## Common Patterns
 
 ### Re-entrancy Prevention
@@ -441,6 +515,11 @@ which is why `soc-relay` dropped the minimum on time it used to have; a boiler t
 already have begun an ignition cycle is the opposite case, and only in one direction. So
 nothing delays the release and nothing but time withdraws it.
 
+`dhw-controller.js`'s window latch is none of these. It holds no clock and expires at no
+interval: the window ends when the hour does, and the flag only records that the enable has
+already closed within it, so a guard falling back through 60 °C does not shut the zone valves
+in the middle of a slot the buffer was hot enough to start.
+
 ### MQTT Subscription Budget
 A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions`
 and the script does not run at all, so overrunning the cap takes out every load that
@@ -469,7 +548,7 @@ on every 30-second keepalive until the answer arrives, since the request is as l
 the answer. `soc-relay-controller.js` asks the lead relay for its time switch input;
 `surplus-dump-controller.js` asks each remote device for its stages' switch status, one ask
 per device rather than per stage; `heating-relay-controller.js` asks .209 for the heat pump
-lock and .123 for the DHW time clock.
+lock and .123 for the DHW time clock; `dhw-controller.js` asks .209 for the same lock.
 
 Surplus keeps a bounded wait behind that ask, `statusSeedTimeout`: it will not disturb loads
 already running before every stage has reported, but past the bound the silent stages are
@@ -529,6 +608,8 @@ Debug messages appear in Shelly console with prefixes:
 - `[DEBUG-DUMP]` - soc-relay-controller.js
 - `[DEBUG-SURPLUS]` - surplus-dump-controller.js
 - `[DEBUG-THERMAL]` - thermal-dump-controller.js
+- `[DEBUG-HEAT]` - heating-relay-controller.js
+- `[DEBUG-DHW]` - dhw-controller.js
 
 ### Quick Status Check
 
@@ -538,7 +619,7 @@ Each controller writes a status summary to a virtual text component. You can fet
 # soc-relay-controller (text:204)
 wget -qO- http://<device>/rpc/Text.GetStatus?id=204
 
-# surplus-dump-controller, thermal-dump-controller (text:200)
+# surplus-dump, thermal-dump, heating-relay, dhw (text:200)
 wget -qO- http://<device>/rpc/Text.GetStatus?id=200
 ```
 

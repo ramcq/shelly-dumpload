@@ -344,9 +344,9 @@ AHS) and the Aerona 290 installation instructions.
 
 In `~/dbus-froeling`: the Lambdatronic 3200 Modbus map
 (`B1200522_ModBus Lambdatronic 3200_50-04_05-19_de.pdf`) and the bridge that publishes
-buffer top, buffer bottom and furnace status to the Cerbo. Register offsets there are
-counted from 30001, so buffer top (32001) is offset 2000 and boiler flow (30001) is
-offset 0.
+buffer top, buffer bottom, boiler flow and furnace status to the Cerbo. Register offsets
+there are counted from 30001, so buffer top (32001) is offset 2000 and boiler flow (30001)
+is offset 0.
 
 Monitoring: [ecoNET](https://www.econet24.com/view/device/243EDPN6KQ38CIH2S02K018/main/),
 Victron VRM, emoncms MyHeatpump.

@@ -23,7 +23,7 @@ it needs only `enable_control`, which is on by default.
 **Deriving it would have put the power system inside the heating scripts.** The shortage
 rule needs four Victron subscriptions. `.123` — whose entire job is letting heat move from
 the buffer into three cylinders — would have carried battery state of charge, inverter state
-and two generation meters, reaching eight of Shelly's ten subscriptions, plus its own copy
+and two generation meters, reaching seven of Shelly's ten subscriptions, plus its own copy
 of 30/90/500. Following the lock costs it one subscription and no knowledge of the battery
 at all.
 
