@@ -4,29 +4,8 @@ How the site behaves as a system: when surplus is dumped, when the heat pump is 
 run, when the biomass is released, and how hot water gets made. This is the layer that
 couples the power system to the heating plant, and it is owned by neither.
 
-The division of labour across the documentation:
-
-| Document | Owns |
-|---|---|
-| [README.md](README.md) | Each script — what it does, how it is configured and deployed |
-| [POWER.md](POWER.md) | The electrical installation and the device inventory |
-| [HEATING.md](HEATING.md) | The heating plant — hydraulics, zones, wiring, commissioning |
-| **CONTROLS.md** | The system — states, thresholds, who decides what, and why |
-| [CONTEXT.md](CONTEXT.md) | The vocabulary every document here uses |
-| [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
-
-**Status.** Everything in this document is deployed. The dump load side has been live for
-months; the heating side — the heat pump lock, the immersions shedding with it, the biomass
-release and the DHW enable — is newly so.
-
-| Behaviour | State |
-|---|---|
-| DHW immersions on SOC thresholds, with a manual time switch | Live |
-| Buffer immersions tracking surplus | Live |
-| Thermal recovery from stalled buffer immersions | Live |
-| Shortage, the heat pump lock and the immersions shedding with it | Live |
-| Biomass release — H1, DHW demand, sustained shortage, exercise run | Live |
-| DHW enable — the time clock, and shortage windows one hour in six | Live |
+Which document owns what is [README.md](README.md)'s table. What is running on a device is
+`Script.List` on the device.
 
 ---
 
@@ -215,11 +194,28 @@ reasonable answer.
 
 The 30, 90 and 500 W numbers therefore exist in exactly one deployment, on one device.
 
+**.209 runs the same file as the four DHW immersions.** They share the shortage rule, and
+above it the proven MQTT, keepalive and re-entrancy code, so one file is the honest
+arrangement: what differs is a row in a table, not a program. `deploy.py` uploads that file
+unaltered, so the row is matched on the device ID at startup — `shortageLead: true` drops all
+three dump-load gates and gives .209 no SOC band of its own, since its relay is the shortage
+terms rather than a dump load's threshold. A device the table does not list runs nothing at
+all, which leaves the relay in the unscripted behaviour the configuration table below
+guarantees; guessing would have run .209 as an immersion, locked below 95% and shed by the
+overload path.
+
 Every follower picks up the current value at startup by publishing `status_update` to
 .209's command topic, which makes it republish on the status topic the follower already
 subscribes to. A follower that never hears an answer sheds nothing: an undeployed or
 unreachable .209 costs the immersion floor and nothing else, and every follower keeps its
 own gates beneath it.
+
+**A broker drop is not the lock moving.** What a drop does to a follower's copy depends on
+what the copy is for. Anything that may have moved unseen is cleared, so that it is unknown
+afterwards rather than merely old: a cleared VE.Bus state is not inverting and sheds, a
+cleared time switch is one that has stopped asking. The lock is kept instead — silence is not
+.209 saying the battery recovered, forgetting it would shed four immersions on a blip, and the
+reconnect asks for it again anyway.
 
 ---
 
@@ -265,31 +261,13 @@ switch still makes hot water with no script running at all.
 
 ## Dump loads today
 
-Live behaviour, for context. Per-script detail is in [README.md](README.md).
+How the dump loads behave together. What each script does on its own is in
+[README.md](README.md).
 
-**DHW immersions** — four 1PM devices, each enabling its immersion above its own SOC
-threshold — 96/95 on .88, 94/93 on .90, 95/94 on .91, 96/95 on .100 — so they stagger
-rather than all switching at once as SOC crosses the band.
-Each checks that generation exceeds 500 W before enabling, so a dump is never *started* out
-of the battery when renewables are short, and checks inverter headroom before adding its
-2.7 kW. Turn-off is purely SOC and waits out no dwell: once the low threshold is crossed,
-2.7 kW comes off the inverter at once. The lead relay (.90) carries a manual time switch on
-its input for intentional water heating; the others follow it over MQTT.
-
-**Buffer immersions** — `surplus-dump-controller.js` on the dimmer allocates surplus
-sequentially across the two Pro 2PM channels, the Pro 1PM carrying immersion 4, and its
-own 0–10 V stage, using *intended*
-rather than measured dump power to avoid feedback loops, with 150 W hysteresis and a 12 kW
-inverter contribution limit. Above 97% SOC it enables loads regardless of measured surplus.
-It reserves headroom for the EVSE when the EV charger is in auto mode rather than fighting the
-EVSE's own surplus algorithm.
-
-**Thermal recovery** — `thermal-dump-controller.js` detects the buffer immersions' thermal
-cutouts (output on, voltage present, no power), then runs the garage fan coil and a
-circulation pump to stir the buffer and bring them back. It suppresses itself while the
-boiler is operating, and equally while it has yet to hear whether the boiler is operating:
-dumping heat is a power system optimisation, and burning wood to feed a fan coil is the one
-outcome worth a few seconds of inhibition at startup to avoid.
+**Each surplus stage holds its position for ten minutes, either way.** That is the one place on
+this site where shedding a dump load waits, and it is not a safety rule: the allocator budgets
+a stage at its nominal power, so it needs the stage to stand still long enough to be budgeted
+against. A stage moving faster than its meter reads is one the next allocation counts wrong.
 
 **Overload risk, still open.** The surplus controller enforces an inverter contribution limit
 for its own loads, and each DHW immersion controller has a generation gate and a headroom
@@ -523,6 +501,15 @@ covering the gap.
 car regardless of availability. Auto mode stops itself on its own surplus criteria, which are
 at least as aggressive as these.
 
+**No threshold is exposed on any device.** Every relay's numbers live in one table in the
+file. They are properties of the system rather than preferences — the immersion stagger
+exists so that four 2.7 kW loads come on in turn, and the shortage band is a fact about the
+generator and the batteries — so a slider would be a knob for something nobody should turn.
+It would also drift: component `202` is shared with the old `smart-load-controller.js` and
+stops at 50, so on .209 it can neither express the 30% entry nor be trusted not to carry a
+stale value, and on the immersions it put the stagger on the devices in one place and in a
+document in another, where the two had already disagreed about .90 and .91.
+
 **No heat pump headroom check.** The heat pump is a load, not a dump. Its draw modulates
 between roughly 0.5 and 5 kW and its meter is not on the Cerbo, so any constant reserved for
 it would be fiction; a locked compressor stays off for the Grant's own restart delay rather
@@ -552,93 +539,3 @@ absorb surplus and has no prior behaviour to preserve, it means off.
 A `Switch.Set` overrides `follow` until the next input edge, so a script can hold .164, .123
 or the lead relay closed for its own reasons without giving up the hardware path.
 
----
-
-## Implementation plan
-
-| Script | Device | Derived from | Job | State |
-|---|---|---|---|---|
-| `soc-relay-controller.js` | .209 | existing, reconfigured | Express shortage on its relay; no dump load gates | Written |
-| `soc-relay-controller.js` | .88 .90 .91 .100 | existing | Follow .209's switch status; shed while it is open, time switch included | Written |
-| `heating-relay-controller.js` | .164 | new | H1; DHW demand; the power system, VE.Bus before the lock; exercise run | Written |
-| `dhw-controller.js` | .123 | `thermal-dump-controller.js` | The time clock, then shortage DHW windows, unguarded where the bridge has failed; derived for its buffer-temperature subscriptions, which gain boiler flow and .209's switch status and lose the buffer bottom and the boiler input | Written |
-
-.209 runs the same file as the four DHW immersions. They share the shortage rule, and above
-it the proven MQTT, keepalive and re-entrancy code, so one file is the honest arrangement:
-what differs is a row in a table, not a program.
-
-**The row is matched on the device ID at startup**, because `deploy.py` uploads one file
-unaltered. `shortageLead: true` drops all three dump-load gates —
-`minGenerationPower: 0` for the generation gate, `inverter.heaterPower: 0` for the headroom
-check and the overload fast-path, and `followTimeSwitch: false` so neither its own input nor
-the lead relay's can unlock the heat pump — and gives it no SOC band of its own, since its
-relay is the shortage terms rather than a dump load's threshold.
-
-**No threshold is exposed on any device.** Every relay's numbers live in one table in the
-file, matched on the ID the device reports at startup. They are properties of the system
-rather than preferences — the immersion stagger exists so that four 2.7 kW loads come on in
-turn, and the shortage band is a fact about the generator and the batteries — so a slider
-would be a knob for something nobody should turn. It would also drift: component `202` is
-shared with the old `smart-load-controller.js` and stops at 50, so on .209 it can neither
-express the 30% entry nor be trusted not to carry a stale value, and on the immersions it
-put the documented stagger on the devices in one place and in this document in another,
-where the two had already disagreed about .90 and .91. A persisted component left behind by
-either script is now ignored rather than read. Immersions still derive their low threshold
-as `high - 1`; only a band too wide to derive is stated outright.
-
-The identity is read before anything else runs, and a device the table does not list runs
-nothing at all: the controller commands nothing, which leaves the relay in the unscripted
-behaviour the configuration table above guarantees — where guessing would have run .209 as
-an immersion, locked below 95% and shed by the overload path.
-
-Every controller asserts `status_ntf` in its own device's MQTT config, rebooting once to set
-it if it is off. Followers read .209's published switch status and the immersions read the
-lead relay's input, so a device with notifications off is a controller whose decision never
-leaves it; the thermal dump reads the buffer immersions', the surplus controller's own
-`light:0` among them, so there it is a stage that boils with nothing watching. The check has
-to run whether or not the client is already connected — on a device that has been up for
-weeks it always is, which is where the same check twice sat and never ran.
-
-The Victron broker behaves the same way, and worse for a value that rarely changes: it
-publishes nothing until a value changes, and the one chance at the rest is the republish an
-empty-payload keepalive triggers. That request has to come from a later turn of the script's
-main loop than the subscriptions do, because `MQTT.subscribe` is only acted on once the
-script yields: asked for in the same breath, the burst is answered before anything is
-listening. So the first request goes out on a timer — the length is immaterial, a
-millisecond would do, and the constant is 1 s — and the periodic keepalive keeps asking
-until the value has actually been seen, which is what covers a request or a burst going
-missing.
-
-Two paths in the site's set have nothing to publish between transitions, so a republish is
-the only way a controller starting up between them ever sees one: `vebus/276/State`, which
-changes when a generator runs, months apart, and `digitalinput/102/State`, which moves when
-the boiler starts or stops firing — several times a day while it is lit, and not at all
-through a spell with power to spare. Everything else — SOC, generation, inverter output,
-tank temperatures — changes every few seconds and arrives regardless, so the fault lands on
-exactly the two paths a gate depends on. Measured on the live broker over 70 seconds, with
-the boiler cold: the tank temperatures arrived four times each and neither of those two
-arrived at all. Observed on .209 on first deployment, 1 September 2026, which read
-VE Off for three minutes while everything else streamed correctly.
-
-Shelly status notifications are published on change and are **not** retained, and how long
-the silence lasts is a property of the signal rather than the device: a PM channel
-republishes every 20–30 seconds whatever it is doing, because its power and energy readings
-drift, while a component with no telemetry — a relay's `input:0` — says nothing at all until
-someone moves it, and a time switch can sit still for hours. So a follower asks rather than
-assumes. Publishing `status_update` to the followed device's `<prefix>/command` topic makes
-it republish every component on `<prefix>/status/…` — the topics the follower already holds
-— so asking costs no extra subscription and no HTTP. The DHW immersions do this against the
-lead relay's input and the surplus controller against each of its remote stages; .164 and
-.123 will do the same against whatever they come to follow. Without it, a controller
-restarting during a hot water window ignores the time switch until the clock next moves.
-
-Shelly caps a script's MQTT subscriptions, and overrunning the cap stops the script outright
-rather than degrading it — see [README.md](README.md) for the number and how to stay under
-it. So the topic sets stay deliberately small: the immersions run seven — five Victron
-paths, the lead relay's input and .209's switch — .209 runs five, .164 runs five: the lock,
-the DHW time clock, `vebus/276/State`, the boiler input and the bridge behind it, and .123
-runs four: the lock, the buffer top, the boiler flow and the bridge behind the last two. The
-thermal dump runs eight. Following the lock rather than deriving it is what
-keeps them there; deriving it would have cost each of them SOC, both generation figures and
-the inverter output — the four paths the terms rest on — which would have put .164 at nine
-and .123 at nine.

@@ -13,14 +13,17 @@ Developed for an off-grid system with Victron Quattro inverters, a Cerbo GX, AC-
 
 ### Documentation
 
-This file describes **each script** — what it does, how it is configured, how it is deployed. The system it runs on is documented alongside it:
+This file describes **each script** — what it does, what it reads, what it requires, how it
+is configured and how it is deployed. Every reason behind a threshold is somewhere else:
 
 | Document | Covers |
 |---|---|
 | [POWER.md](POWER.md) | The electrical installation: generation, battery, inverters, generator settings, and the canonical device inventory |
 | [HEATING.md](HEATING.md) | The heating plant: heat pump, biomass boiler, buffer, zones, wiring, commissioning |
-| [CONTROLS.md](CONTROLS.md) | The system as a whole: shortage, who decides it, what each actuator does, and the work not yet implemented |
+| [CONTROLS.md](CONTROLS.md) | The system as a whole: shortage, who decides it, what each actuator does, and why |
 | [CONTEXT.md](CONTEXT.md) | The glossary: buffer immersion vs DHW immersion, dump load as a mode, shortage, release vs lock, DHW demand vs DHW enable |
+| [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
+| [docs/](docs) | The archive: incident write-ups and equipment manuals |
 
 Power flow — why AC-coupled generation does not count against the inverter's battery contribution, and how the 12 kW limit is calculated — is in [POWER.md](POWER.md). The overload risk that remains when several controllers act independently is in [CONTROLS.md](CONTROLS.md).
 
@@ -72,391 +75,356 @@ The deployment script:
 node --test tests/
 ```
 
-No dependencies and no build step — `tests/harness.js` loads a controller under
-stubbed `Shelly`, `MQTT`, `Timer` and `Virtual` globals and exports its internals, so
-the decision logic can be exercised without a device. `Shelly.call` never calls back,
-so the script's own `init()` stalls after the first RPC and starts no timers.
+No dependencies and no build step — `tests/harness.js` loads a controller under stubbed
+`Shelly`, `MQTT`, `Timer` and `Virtual` globals and exports its internals, so the decision
+logic can be exercised without a device. `Shelly.call` never calls back, so the script's own
+`init()` stalls after the first RPC and starts no timers; it records each callback alongside
+its arguments, so a test can answer an RPC as the device would.
 
-What they cover is the failures that are expensive on live plant rather than merely wrong:
-which device and channel a stage actually commands, the
-[subscription budget](#mqtt-subscription-budget), and
-[initialisation](#seeding-state-from-other-devices) — the last two because both fail by
-stopping the whole controller, not just the stage being changed.
+The suites go where a failure is expensive on live plant rather than merely wrong:
 
-`soc-relay-controller.js` runs in two roles from one file, so its tests assert both: that
-the shortage lead drops every dump-load gate, and that the immersions keep every one of
-them.
-
-`heating-relay-controller.js` is tested for the cases where a rung looks satisfied and is
-not — a generator start reaching the rung below it, a fourteen-day timer read off a clock
-that has never synchronised, a fire lit on a power system nobody can read — and for the
-order of the ladder itself, since every rung ends in the same relay and only the ordering
-says which of them may speak. `Shelly.call` records its callback as well as its arguments, so
-a test can answer an RPC as the device would, which is what makes "the key has never been
-written" reachable.
-
-`dhw-controller.js` is tested from both directions at once, because its two rungs fail
-oppositely: the time clock must close the enable with nothing else known at all, and a
-window must not open on a buffer reading that has never arrived. Its slots are wall-clock
-times, so `sys` is stubbed with and without a synchronised clock.
+- which device and channel a stage actually commands
+- the [subscription budget](#mqtt-subscription-budget) and
+  [initialisation](#seeding-state-from-other-devices), both of which fail by stopping the
+  whole controller rather than the stage being changed
+- both roles of `soc-relay-controller.js`, which runs from one file: the shortage lead drops
+  every dump-load gate, the immersions keep every one of them
+- `heating-relay-controller.js`, for the order of its ladder and for the rungs that look
+  satisfied and are not — a generator start reaching the rung below, a fourteen-day timer
+  read off a clock that has never synchronised, a fire lit on a power system nobody can read
+- `dhw-controller.js` from both ends, since its two rungs fail oppositely, with `sys` stubbed
+  with and without a synchronised clock
 
 ## Scripts Overview
 
-### soc-relay-controller.js
-**Device:** Shelly Plus 1PM Gen3 (DHW immersions), Shelly 1 Mini Gen3 (Heat Pump Enable)
-**Purpose:** Relay on above a high SOC threshold, off below a low one, gated on VE.Bus state
+Each section takes the same slots in the same order: device, purpose, what it does, what it
+reads, what it requires, configuration, virtual components.
 
-Two roles, resolved from the device ID at startup:
+### soc-relay-controller.js
+
+**Device:** Shelly Plus 1PM Gen3 (DHW immersions), Shelly 1 Mini Gen3 (Heat Pump Enable)
+**Purpose:** Switch a DHW immersion on a narrow SOC band — or, on .209, hold no band at all
+and express shortage on the relay every other controller follows
+
+**What it does.** Two roles, resolved from the device ID at startup:
 
 | Role | Devices | Job |
 |---|---|---|
-| Dump load | .88 .90 .91 .100 | DHW immersions on a narrow SOC band, coordinated by a lead relay carrying the manual time switch, and shed while the heat pump lock is open |
-| Shortage lead | .209 | No band of its own: its relay *is* shortage, expressed — the Grant's heat pump lock, which every follower reads. See [CONTROLS.md](CONTROLS.md) |
+| Dump load | .88 .90 .91 .100 | A DHW immersion on its own SOC band, coordinated by a lead relay carrying the manual time switch, and shed while the heat pump lock is open |
+| Shortage lead | .209 | No band of its own: its relay *is* the heat pump lock, and every follower reads it — see [CONTROLS.md](CONTROLS.md) and [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md) |
 
-**Features:**
-- Lead relay coordination via MQTT
-- Manual time switch support (connected to lead relay input)
-- Per-device SOC thresholds from `config.relays`, the one table this file's five deployments share
-- Hysteresis derived as low = high - 1%
-- Shortage decided by .209 and expressed on its relay; the immersions follow it — see [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md)
-- No dwell timers in either direction
-- AC input suppression
+One ladder, first match wins. Rung 1 is the whole of what .209 does; every other rung is a
+dump load concern, which the shortage lead drops:
 
-**Priority Logic:** (everything but 1 is a dump load concern, which the shortage lead drops;
-1 is the whole of what .209 does)
-0. **Inverter overload** - Emergency suppression if inverter output exceeds limit (overrides all)
-1. **Shortage** - On .209, its relay is the shortage state: closed when there is none, open when there is, and nothing yet heard from the Cerbo means no action either way for `config.startupGrace` (3 minutes). On a dump load, an open lock sheds the relay and returns — which covers the time switch as well as the SOC band, and saves a separate shed for the lead relay whose hardware follow has already closed it. A lock never heard from sheds nothing
-2. **Local input** - Manual override (with inverter headroom check before enabling)
-3. **Lead relay input** - Follow manual time switch on lead device (with headroom check)
-4. **VE.Bus state** - Only allow dump loads when VE.Bus is Inverting (state 9). Covers: inverter off/faulted, generator/grid connected (Bulk/Absorption/Float/Passthru/Power Assist), and inverter bypassed. An unknown or stale state counts as not inverting; a state not yet received within `config.startupGrace` counts as nothing. The lock covers this too, but the gate is one subscription the relay already holds and it is what keeps a dump load safe with no .209 answering
-5. **SOC control** - Normal automatic operation (with generation and headroom checks before enabling)
+| | Rung | On a dump load | On .209 |
+|---|---|---|---|
+| 0 | Inverter overload | Sheds above `inverter.emergencyLimit`, on MQTT receipt and again on every poll | Dropped |
+| 1 | Shortage | Sheds while the lock is open, and returns. A lock never heard from sheds nothing | Its relay is the answer: closed when there is no shortage, open when there is |
+| 2 | Local input | Manual override, after a headroom check | Dropped — `followTimeSwitch: false` |
+| 3 | Lead relay input | Follows the manual time switch on .90, after a headroom check | Dropped |
+| 4 | VE.Bus state | Enables only in Inverting (9). Unknown or stale counts as not inverting; nothing received within `config.startupGrace` counts as nothing | A term of shortage, in rung 1 |
+| 5 | SOC band | `high` on, `low` off, after the generation gate and a headroom check | No band |
 
-**Shortage**, on .209 only: `VE.Bus ≠ Inverting`, or the latch — on at `SOC ≤ 30%`, off at
-`SOC ≥ 90%`, held between the two, and settled by more than `config.shortage.minGeneration`
-of generation where it has never been resolved. An unknown or stale VE.Bus state counts as
-not inverting; the VE.Bus term overlays the latch rather than gating it, so the SOC terms
-settle without waiting for a VE.Bus reading. All of it is `config.shortage`. Why the band is
-60 points wide, and why an unresolved latch assumes shortage, are in
-[CONTROLS.md](CONTROLS.md).
+- **Rung 4 is the AC input gate,** under the name of the reading it uses. With no grid on
+  site an AC input in use is one generator or another, which takes VE.Bus into Power Assist,
+  Bulk, Absorption, Float, Passthru or external control; off, faulted and bypassed are the
+  rest of what is not state 9. Why the state is read rather than the generator service is in
+  [CONTROLS.md](CONTROLS.md#why-vebus-state-rather-than-the-generator-is-running).
+- **Shortage**, computed on .209 only, is `config.shortage`: a latch on SOC with the VE.Bus
+  term overlaid rather than gating it, settled by generation where it has never been
+  resolved, and nothing heard from the Cerbo means no action either way for
+  `config.startupGrace`. The terms and the numbers are in
+  [CONTROLS.md](CONTROLS.md#shortage).
+- .209 reads its latch back off its own relay contact at startup, trusting it only where the
+  switch's last-command `source` shows that something commanded it.
+- **Generation gate:** will not enable below `config.minGenerationPower` (500 W) of
+  AC-coupled plus DC-coupled generation. `config.shortage.minGeneration` is the same reading
+  against the same threshold and is never disabled; this gate is, for a relay that is not a
+  dump load.
+- **Headroom check** before enabling: current inverter output plus `inverter.heaterPower`
+  must stay under `inverter.emergencyLimit` (13 kW). Also polled every 30 s.
+- **Turn-off is SOC alone and immediate.** There are no dwell timers in either direction, so
+  a hydro trip sheds the load at once.
+- **Each relay decides in its own slot** of the check interval — `config.relays[].pollOffset`,
+  anchored to `unixtime`, falling back to phasing from its own start on a device whose clock
+  has never synchronised. Only enabling waits; shedding keeps the edge, and a script's first
+  check is not held back. See [CONTROLS.md](CONTROLS.md).
 
-**A dump load does not compute any of this.** It follows .209's switch status, which is one
-boolean and one subscription, and sheds while the lock is open. See
-[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
+**What it reads.** Five Victron paths — `system/0/Dc/Battery/Soc`,
+`system/0/Ac/PvOnOutput/L1/Power`, `dcsource/279/Dc/0/Power`, `vebus/276/State`,
+`vebus/276/Ac/Out/L1/P` — plus the lead relay's `input:0` and .209's `switch:0` status: seven
+subscriptions on an immersion, five on .209. Its own `input:0` it reads locally.
 
-**Generation Gate:**
-- Will only enable the relay if total generation (AC-coupled + DC-coupled) exceeds a minimum threshold (default: 500W)
-- Prevents enabling dump loads when there is no generation (e.g. post-outage restart, nighttime)
-- Shortage uses the same reading against the same threshold, but under `config.shortage.minGeneration`, which is never disabled; this gate is, for a relay that is not a dump load
-- Naturally self-staggers multiple dump loads *as SOC crosses their thresholds*: each load coming on reduces battery charging rate, and only enables when its own SOC threshold is met with sufficient generation. A release that finds every threshold already satisfied is spaced by `pollOffset` instead — see [CONTROLS.md](CONTROLS.md)
-- Turn-off is purely SOC-based and immediate — a hydro trip sheds the load at once
-- Configurable via `config.minGenerationPower`
+**What it requires.**
+- A row in `config.relays` matched on the ID the device reports at startup, read
+  synchronously with `Shelly.getDeviceInfo()` before anything else runs. A device the table
+  does not list runs nothing at all.
+- `detached` with `initial_state: "off"` on a dump load, `follow` with `match_input` on the
+  lead relay (.90), `detached` with `initial_state: "on"` on .209 — the relay configuration
+  table is in [CONTROLS.md](CONTROLS.md#relay-configuration).
+- `status_ntf` in the device's MQTT config. The script asserts it, rebooting once if it was
+  off, since a follower reads a published switch or input status and nothing else.
 
-**Inverter Overload Protection:**
-- Fast-path emergency suppression on MQTT receipt if inverter output exceeds 13kW
-- Pre-enable headroom check: won't turn on if current inverter output + heater power >= 13kW
-- Belt-and-braces polling check in checkSystemState (every 30s)
-- Configurable via `config.inverter.emergencyLimit` and `config.inverter.heaterPower`
+**Configuration.** `config.relays` is the whole of it: one row per device carrying its name,
+its `high` threshold (and `low` where the band is too wide to derive as `high - 1`), and the
+`leadRelay` / `shortageLead` flags that are the only things varying by role. No threshold is
+exposed on any device — see [CONTROLS.md](CONTROLS.md). A `number:202` left behind by
+`smart-load-controller.js` or by an earlier version of this script is ignored, not read.
 
-**Shortage Lead Role (.209, Heat Pump Enable):**
-- Its row in `config.relays` carries `shortageLead: true`; everything else follows from that flag
-- No SOC band of its own — its relay is closed exactly when there is no shortage, and that relay is what every follower reads
-- Reads its latch back off its own relay contact on a script restart, trusting it only where the switch's last-command `source` shows something commanded it
-- Every dump load gate dropped: no generation gate, no headroom check, no overload fast-path. The heat pump is a load, not a dump, and overload reaches it through the VE.Bus term once the generator starts
-- `followTimeSwitch: false` — nothing is wired to its input, and hot water is no reason to run the heat pump on a flat battery
-- Status text names the relay and its position — `HP Enable OFF` — with the shortage term that put it there appended, e.g. `SHORTAGE: SOC 28%`. The band it shows is `config.shortage`, `[On:90%, Off:30%]`, which reads the same way round as a dump load's because the relay closes at the high threshold and opens at the low one
-- Requires the relay to be `detached` with `initial_state: "on"` — see the relay configuration table in [CONTROLS.md](CONTROLS.md)
-
-**Configuration:**
-- `config.relays` is the whole configuration: one row per device, matched on the ID the device reports at startup, carrying its name, its `high` threshold (and `low` where the band is too wide to derive), and the `leadRelay` / `shortageLead` flags that are the only things that vary by role
-- Thresholds are not knobs. The immersion stagger and the shortage band are properties of the system, so they live in the table and nowhere else — not in a slider that can drift from what the documents say, and not on five devices that can drift from each other
-- The device ID is read synchronously with `Shelly.getDeviceInfo()`, so the role is settled before anything else runs and there is nothing to retry. A device the table does not list runs nothing at all, which is what makes a misdirected deploy safe
-- Lead relay uses local input; others monitor via MQTT
-- Asserts `status_ntf` in the device's MQTT config, rebooting once if it was off. Followers read a published switch or input status and nothing else, so a device with notifications off is a decision that never leaves it
-
-**Virtual Components:**
-- `text:204` - Status display
-
-A `number:202` left behind by `smart-load-controller.js` or by an earlier version of this
-script is ignored, not read: the table is the only source of a threshold.
+**Virtual components.** `text:204`, the status display. Its line names the relay and its
+position — `HP Enable OFF` — with the term that put it there appended, e.g.
+`SHORTAGE: SOC 28%`. On .209 the band it shows is `config.shortage`, `[On:90%, Off:30%]`,
+which reads the same way round as a dump load's: the relay closes at the high threshold and
+opens at the low one.
 
 ---
 
 ### surplus-dump-controller.js
+
 **Device:** Shelly Pro 0/1-10V Dimmer PM
-**Purpose:** Intelligent surplus power management across multiple dump loads
+**Purpose:** Allocate surplus generation across four 2.69 kW buffer immersions, one of them
+variable
 
-Advanced controller managing four 2.69kW dump loads to consume excess generation:
-- **Local dimmer output** - 0-10V controlled SSR (variable 0-100%), buffer immersion 3
-- **Remote Switch 0** - Shelly Pro 2PM switch 0 via MQTT RPC (ON/OFF), buffer immersion 1
-- **Remote Switch 1** - Shelly Pro 2PM switch 1 via MQTT RPC (ON/OFF), buffer immersion 2
-- **Remote Switch 2** - Shelly Pro 1PM switch 0 via MQTT RPC (ON/OFF), buffer immersion 4
+**What it does.** Four stages, allocated in list order. Each remote stage names its own
+device and channel, so the constant stages need not share a Shelly, and the position in the
+list is not the switch id on the device:
 
-Each remote stage names its own device and channel, so the constant stages need not
-share a Shelly. The position in the list is the allocation order and is not the switch
-id on the device.
+| Stage | Output | Load |
+|---|---|---|
+| 1 | Shelly Pro 2PM switch 0, over MQTT RPC | Buffer immersion 1 |
+| 2 | Shelly Pro 2PM switch 1, over MQTT RPC | Buffer immersion 2 |
+| 3 | Shelly Pro 1PM switch 0, over MQTT RPC | Buffer immersion 4 |
+| 4 | Local 0–10 V dimmer output, variable 0–100% | Buffer immersion 3 |
 
-**Power Sources:**
-- AC-coupled generation (solar + AC hydro) - reported as "Solar" by Victron
-- DC-coupled hydro turbine - small hydro on DC side
-
-**Algorithm:**
 ```
 Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom
 ```
 
-**Key Features:**
+Intended dump power rather than measured, which is what keeps the allocation out of a
+feedback loop; actual power is used only in dry-run mode.
 
-**Intended vs Actual Power:**
-- Uses *intended* dump power (not actual) to avoid feedback loops
-- Calculates based on what controller *intends* to consume
-- Only uses actual power in dry-run/observation mode
+Priority, first match wins:
 
-**Stall Detection:**
-- Detects thermal cutouts (output ON, voltage present, no power)
-- Keeps stalled loads ON but reallocates their power budget
-- 30-second grace period (measurements lag commands)
+1. Wait for initial data, rather than act on stale state
+2. **VE.Bus state** — dumps only in Inverting (9)
+3. **Low SOC** — suppress below the target (97% default)
+4. **EV auto mode** — normal surplus control, so as not to oscillate against the EVSE
+5. **High SOC** — enable within the inverter limit, when no EV is charging in auto
+6. **Normal surplus control** — sequential allocation
 
-**Priority System:**
-1. Wait for initial data (avoid acting on stale state)
-2. **VE.Bus state** - Only allow dumps when VE.Bus is Inverting (state 9)
-3. **Low SOC protection** - Suppress if SOC < target (97% default)
-4. **EV auto mode** - Use normal surplus control when EV charging in auto (prevents oscillation)
-5. **High SOC protection** - Enable dumps if SOC > target (respecting inverter limit, only when no EV auto)
-6. **Normal surplus control** - Sequential load allocation
+- **Stall detection:** output on, voltage present and no power is a thermal cutout. A stalled
+  stage stays on and its budget is reallocated, after a 30-second grace because measurements
+  lag commands.
+- **Inverter overload:** enforces `dumpLoad.maxInverterContribution` (12 kW) against
+  AC consumption minus AC-coupled generation, with a fast-path shutoff at
+  `dumpLoad.emergencyInverterLimit` (13 kW). Why DC-coupled generation adds to available
+  power without reducing inverter load is in [POWER.md](POWER.md).
+- **EVSE coordination:** reserves headroom while the charger is in auto mode, being max EVSE
+  power minus actual EVSE draw.
+- **Anti-oscillation:** 150 W hysteresis on available power, a 5% minimum dimmer change, and
+  a floor function that biases towards slight underutilisation.
+- **`dumpLoad.minChangeTime`,** 10 minutes per stage and symmetric — see
+  [CONTROLS.md](CONTROLS.md#dump-loads-today).
+- **`statusSeedTimeout`,** 90 seconds: loads already running are not disturbed until every
+  stage has reported, and past the bound the silent stages are assumed off and the rest
+  controlled anyway. Commanding a stage into the position it is already in is a no-op.
 
-**Inverter Overload Protection:**
-- Enforces maximum inverter contribution limit (default: 12kW from battery)
-- Calculates: `Inverter Contribution = AC Consumption - AC-Coupled Generation`
-- DC-coupled sources (DC hydro) go through the inverter, so they add to available power but don't reduce inverter load
-- In high SOC mode, only enables dump loads that fit within available inverter capacity
-- Prevents overload when house loads (cooking, immersions, etc.) are already high
-- Configurable via `config.dumpLoad.maxInverterContribution` (default: 12000W)
-- Fast-path emergency shutoff at 13kW inverter output (configurable via `emergencyInverterLimit`)
+**What it reads.** Seven Victron paths — AC-coupled generation, DC hydro, AC consumption,
+`evcharger/40/#`, SOC, VE.Bus state and inverter output — plus one `<device-id>/status/+`
+wildcard per remote device: nine subscriptions for three remote stages on two devices.
 
-**EVSE Coordination:**
-- Reserves headroom when EV charger in auto mode
-- Avoids fighting with EVSE's own surplus algorithm
-- Headroom = max EVSE power - actual EVSE draw
+**What it requires.** Remote stages `detached` with `initial_state: "off"` — see
+[CONTROLS.md](CONTROLS.md#relay-configuration). `status_ntf` on this device, which the script
+asserts, and on each remote device, whose published switch status is what the allocator
+follows.
 
-**Anti-Oscillation:**
-- 150W hysteresis on available power
-- 5% minimum dimmer change threshold
-- Sequential allocation: Switch0 → Switch1 → Dimmer
-- Floor function bias (favors slight underutilization)
+**Configuration.** `remoteSwitches.switches`, one entry per stage; heater power (2690 W
+default); dry-run mode; target SOC threshold; EVSE instance and maximum headroom.
 
-**Configuration:**
-- Configurable heater power (2690W default)
-- Dry-run mode for testing
-- Target SOC threshold
-- EVSE instance and max headroom
-
-**Virtual Components:**
-- `text:200` - Status display (minimal to reduce MQTT traffic)
+**Virtual components.** `text:200`, the status display, kept minimal to reduce MQTT traffic.
 
 ---
 
 ### thermal-dump-controller.js
+
 **Device:** Shelly 2PM Gen3
-**Purpose:** Thermal dump heat recovery from solar dump loads
+**Purpose:** Recover the heat trapped in a buffer immersion that has reached its thermal
+cutout
 
-Monitors each dump load (via MQTT) for thermal cutout condition, then activates thermal dump outputs to recover waste heat from hot water tank.
+**What it does.** Priority, first match wins:
 
-**Monitored Dump Loads:** one per buffer immersion, matching the stages
-`surplus-dump-controller.js` can switch. An immersion that is switchable but not listed
-here reaches its thermal cutout with nothing to recover it.
-- Shelly Pro 2PM - Switch 0 (buffer immersion 1)
-- Shelly Pro 2PM - Switch 1 (buffer immersion 2)
-- Shelly Pro Dimmer 0-10V PM - Light output (buffer immersion 3)
-- Shelly Pro 1PM - Switch 0 (buffer immersion 4)
+1. **Frost protection** — both outputs on, unconditionally, while the frost thermostat is active
+2. **Boiler suppression** — off while the boiler is operating, and equally while it has yet
+   to hear whether it is
+3. **Temperature** — off below `thresholds.minTankTemp` (70 °C) at the buffer top
+4. **Thermal dump** — if any monitored immersion is stalled: pump always on, fan coil on where
+   top minus bottom is within `thresholds.maxTempDelta` (5 °C)
 
-**Controlled Outputs:**
-- **Output 0** - Fan coil (heating from tank)
-- **Output 1** - Circulation pump (stirs tank)
+Stall is output on, voltage at or above 200 V and power at or below 5 W. Intended-state
+tracking holds the expected position of each output against the actual one, so only an
+unexpected change triggers another pass and RPC callbacks cannot re-enter.
 
-**Stall Detection:**
-Output ON + Voltage ≥ 200V + Power ≤ 5W = Thermal cutout detected
-
-**Priority Logic:**
-1. **Frost protection** - Unconditional ON if frost thermostat active
-2. **Boiler suppression** - OFF if boiler operating
-3. **Temperature check** - OFF if top tank < 70°C
-4. **Thermal dump activation** - If any dump load stalled:
-   - **Pump** - Always ON (stir tank)
-   - **Fan coil** - ON if temp delta ≤ 5°C (top - bottom)
-
-**Intended State Tracking:**
-- Prevents RPC re-entrancy issues
-- Tracks expected vs actual output state
-- Only triggers checkSystemState() on unexpected changes
-
-**When the Fröling bridge cannot read the boiler** — `temperature/100/Connected` at 0 —
+When the Fröling bridge cannot read the boiler — `temperature/100/Connected` at 0 —
 priorities 2 and 3 both suppress, on `bridgeIsDown()` rather than on the readings, which are
 left where they are because the bridge keeps publishing them. See
 [CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
 
-**Configuration:**
-- Monitors Victron temperature sensors (top/bottom tank), and the bridge behind them
-- Monitors boiler digital input state
-- 5-minute minimum run time
-- 10-second check interval
+**Controlled outputs:** switch 0 is the garage fan coil, switch 1 the buffer circulation pump.
 
-**Virtual Components:**
-- `text:200` - Status display
+**What it reads.** `temperature/100/Temperature` and `temperature/101/Temperature` (buffer top
+and bottom), `digitalinput/102/State` (the boiler), `temperature/100/Connected` (the bridge
+behind the first two), and the switch status of each monitored immersion: eight subscriptions.
+
+Monitored loads are one per buffer immersion, matching the stages `surplus-dump-controller.js`
+can switch — an immersion that is switchable but not listed here reaches its thermal cutout
+with nothing to recover it:
+
+- Shelly Pro 2PM switch 0 and switch 1 (buffer immersions 1 and 2)
+- Shelly Pro Dimmer 0-10V PM light output (buffer immersion 3)
+- Shelly Pro 1PM switch 0 (buffer immersion 4)
+
+**What it requires.** The frost thermostat on this device's `input:0`. `status_ntf` on this
+device, which the script asserts, and on each monitored device, since a stage that boils with
+nothing watching is what an unpublished status costs here.
+
+**Configuration.** `config.dumpLoads`, the monitored list; the stall and temperature
+thresholds; a 5-minute minimum run time; a 10-second check interval.
+
+**Virtual components.** `text:200`, the status display.
 
 ---
 
 ### heating-relay-controller.js
+
 **Device:** Shelly 1 Mini Gen3 (Boiler Release)
 **Purpose:** Close the Fröling's volt-free release contact when anything on the site wants
-wood burnt
+wood burnt. Releasing is permission, never a command — see
+[CONTEXT.md](CONTEXT.md) for the term and [CONTROLS.md](CONTROLS.md) for what it costs
 
-Releasing is permission, never a command: the boiler holds its own 70 °C buffer target and
-decides for itself whether it fires. So a release that turns out to be unnecessary costs
-nothing, and a release granted too readily costs wood that cannot be un-burnt.
-
-**The ladder.** One rung at a time, first match wins — the relay has only one position to be
-in, so the order is what each rung is worth as an *explanation*, not what it is worth as a
-reason.
+**What it does.** One ladder, one rung at a time, first match wins:
 
 | | Rung | Reads | Waits |
 |---|---|---|---|
-| 1 | H1, the Grant's back-up heater request | its own `input:0` | nothing — hardware `follow` has already closed the relay, and the script's job is not to undo it |
-| 2 | DHW demand | .123's `input:0`, which is the DHW time clock | nothing — a request for heat the system may not have |
-| 3 | The power system | `vebus/276/State`, then .209's switch status | 30 min on VE.Bus; nothing on the lock |
-| 4 | Exercise run | `digitalinput/102/State`, against a timestamp in KVS | 14 days with no observed ignition |
+| 1 | H1, the Grant's back-up heater request | its own `input:0` | nothing — hardware `follow` has already closed the relay |
+| 2 | DHW demand | .123's `input:0`, which is the DHW time clock | nothing |
+| 3 | The power system | `vebus/276/State`, then .209's switch status | `release.sustainedAfter`, 30 min, on VE.Bus; nothing on the lock |
+| 4 | Exercise run | `digitalinput/102/State`, against a timestamp in KVS | `release.exerciseInterval`, 14 days with no observed ignition |
 
-**Rung 3 reads VE.Bus first, and that ordering is the whole of it.** .209 opens the heat pump
-lock *because* VE.Bus left Inverting, so while that is true the lock is the same fact
-arriving a second time — and taking it at face value would release the boiler the instant a
-generator started. Reading VE.Bus first leaves the lock exactly one thing left to mean:
+Rung 3 reads VE.Bus first and the lock second, which leaves the lock exactly one thing left
+to mean: an unreadable VE.Bus asks for nothing, a VE.Bus that is not inverting releases after
+30 minutes — or at once where the relay is already on — an open lock under a VE.Bus that is
+inverting releases at once, and a closed or unheard lock does nothing. Which case is which,
+and why the ordering is the rule rather than an implementation detail, is in
+[CONTROLS.md](CONTROLS.md); why it follows a relay rather than the shortage terms is
+[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
 
-- **VE.Bus unreadable** — never heard, or stale after a broker drop — and the rung asks for
-  nothing. The Fröling's augers, fan and pump all run off the house supply, so releasing the
-  boiler because the power system cannot be read risks lighting a fire and then losing
-  circulation. The Cerbo is also what connects the BMS to the inverter, so a Cerbo this
-  controller cannot hear is a power system in trouble rather than one it is merely unsure
-  about
-- **VE.Bus not inverting** — a generator run, a passthrough, a fault, an overload start — and
-  the boiler is released once that has been true for 30 minutes, which clears the fortnightly
-  generator test run (20 minutes minimum runtime) without knowing anything about generators.
-  *Or* immediately if the relay is already on, because whatever released it had already
-  waited and a script that has just restarted cannot measure what it did not watch
-- **VE.Bus inverting, lock open** — nothing but a low battery opens the lock without taking
-  VE.Bus out of Inverting, and a battery at 30% is released by reaching 90% rather than by
-  the minute passing. Nothing to wait for
-- **VE.Bus inverting, lock closed or unheard** — nothing. An undeployed or unreachable .209
-  leaves this relay with H1 in hardware, which is what it had before the Shelly was there
+- **`release.minimumOnTime`,** 60 minutes: a release *this script* granted is not withdrawn
+  inside the hour, whatever changes underneath it. It says nothing about a relay H1 is
+  holding closed, or one a previous run left closed — `follow` opens the first on the H1
+  edge.
+- **The exercise run** — the rule and the reasoning are in
+  [CONTROLS.md](CONTROLS.md#exercise-run). What this script holds is
+  `config.kvs.lastIgnition`, the timestamp every observed ignition
+  rewrites — except a re-ignition inside `release.exerciseHold`, since a lit boiler cycles
+  several times a day. The KVS read is seeded with the current time where there is no record
+  *or none that can be read*, and retried on every poll until it lands.
+- **`syncedNow()`** is `sys.unixtime` only where `sys.last_sync_ts` says the clock has
+  actually been set, and the exercise run is inert without it. It is the one term measured
+  across a reboot; every other wait is timed within a single run, on `Date.now()`.
+- **On a restart** the contact outlives the script, so a relay found closed is left alone
+  while any of the readings that could justify it is still outstanding; past
+  `config.startupGrace`, silence is taken at face value. Nothing else is reconstructed —
+  rung 3's "already on" clause is what carries a burn through a redeploy.
+- **When the Fröling bridge cannot read the boiler** — `digitalinput/102/Connected` at 0 —
+  `exerciseDue()` returns false and the other three rungs never touch the Fröling. The state
+  is not forgotten, since the bridge keeps publishing it: suppression is read at the point of
+  use. See [CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
 
-Why it follows a relay rather than the shortage terms is
-[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md); which case is which
-is [CONTROLS.md](CONTROLS.md).
+**What it reads.** Five subscriptions, every one of them silent between transitions and so
+asked for rather than waited on (see
+[Seeding State From Other Devices](#seeding-state-from-other-devices)): .209's `switch:0`
+status, .123's `input:0`, `vebus/276/State`, `digitalinput/102/State` and
+`digitalinput/102/Connected`. Its own `input:0` it reads locally, and
+`config.kvs.lastIgnition` from KVS.
 
-**Minimum on time:** a release *this script* granted is not withdrawn for 60 minutes,
-whatever changes underneath it — by then the boiler may have begun an ignition cycle, which
-is the expensive part and the part that wears. It says nothing about a relay H1 is holding
-closed, or one a previous run left closed: `follow` opens the first on the H1 edge, and
-undoing the hardware is not what the rule is for. See [Dwell Timers](#dwell-timers) for the
-other two in the repo and how this one differs.
+**What it requires.**
+- The one device it belongs on, matched on the ID it reports at startup. .123 is next door in
+  the same cupboard and its relay looks identical, so an unrecognised device runs nothing at
+  all and leaves the relay with H1 in hardware.
+- `follow` with `initial_state: "match_input"` — see the relay configuration table in
+  [CONTROLS.md](CONTROLS.md#relay-configuration).
+- `status_ntf` in the device's MQTT config. The script asserts it, rebooting once if it was
+  off, which every controller here does whether or not anything follows it.
+- A synchronised clock, for the exercise run only.
 
-**The exercise run:** the rule and the reasoning are in
-[CONTROLS.md](CONTROLS.md#exercise-run). What this script holds:
-- `config.kvs.lastIgnition`, the timestamp every observed ignition rewrites — except a
-  re-ignition inside the hold, since a lit boiler cycles several times a day and the value is
-  only ever read against fourteen days
-- The KVS read, seeded with the current time where there is no record *or none that can be
-  read*, and retried on every poll until it lands
-- `syncedNow()`, which is `sys.unixtime` only where `sys.last_sync_ts` says the clock has
-  actually been set. The exercise run is the one thing here measured across a reboot, so it
-  is also the only one that needs a clock the device did not invent, and it is inert without
-  one. Every wait is timed within a single run and uses `Date.now()`
+**Configuration.** `config.release` carries the four intervals; `config.heatPumpLock` and
+`config.dhwClock` the status and command topics of the two Shellys it follows;
+`config.device` the ID and name. No alerting — the Fröling has its own remote monitoring.
 
-**A restart, with the boiler already burning:** the contact outlives the script, and every
-reading that could justify it arrives over MQTT some time after the script starts. So a relay
-found closed is left alone while any of those readings is still outstanding — past
-`config.startupGrace`, silence is taken at face value. Nothing else is reconstructed: rung 3's
-"already on" clause is what carries a burn through a redeploy, and it needs no stored state
-because the relay itself is the state.
-
-**MQTT Subscriptions:** five — the lock, the DHW time clock, `vebus/276/State`, the boiler
-input and `digitalinput/102/Connected`. Every one of them is silent between transitions, so
-all five are asked for rather than waited on; see
-[Seeding State From Other Devices](#seeding-state-from-other-devices).
-
-**When the Fröling bridge cannot read the boiler** — `/Connected` at 0 — `exerciseDue()`
-returns false; the other three rungs never touch the Fröling. The state itself is not
-forgotten, since the bridge keeps publishing it: suppression is read at the point of use. See
-[CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
-
-**Configuration:**
-- One device, matched on the ID it reports at startup. .123 is next door in the same cupboard
-  and its relay looks identical, so an unrecognised device runs nothing at all and leaves the
-  relay with H1 in hardware
-- Requires the relay to be `follow` with `initial_state: "match_input"` — see the relay
-  configuration table in [CONTROLS.md](CONTROLS.md)
-- No alerting: the Fröling has its own remote monitoring, which is where boiler faults belong
-
-**Virtual Components:**
-- `text:200` - Status display
+**Virtual components.** `text:200`, the status display.
 
 ---
 
 ### dhw-controller.js
+
 **Device:** Shelly 1 Mini Gen3 (DHW Enable)
-**Purpose:** Permit heat to move from the buffer into the three cylinders
+**Purpose:** Permit heat to move from the buffer into the three cylinders. The enable permits
+and never asks, which is why nothing here senses cylinder temperature; it is not DHW demand
+and releases no boiler — .164 reads this device's *input* for that rung, never its relay
 
-The enable permits and never asks: the cylinder thermostats decide whether anything actually
-moves, which is why nothing here senses cylinder temperature. It is not DHW demand and
-releases no boiler — .164 reads this device's *input* for that rung, never its relay.
-
-**The ladder.** Two rungs, first match wins.
+**What it does.** Two rungs, first match wins:
 
 | | Rung | Reads | Guarded by |
 |---|---|---|---|
 | 1 | The DHW time clock | its own `input:0` | nothing at all |
-| 2 | A shortage DHW window | .209's switch status, and the local wall clock | buffer top or boiler flow ≥ 60 °C |
+| 2 | A shortage DHW window | .209's switch status, and the local wall clock | buffer top or boiler flow at or above `window.minBufferTemp` (60 °C) |
 
-**The clock is first because it takes authority.** A `Switch.Set` overrides `follow` until
-the next input edge, so reading its own input second would open an enable the user asked for
-at 05:30 the moment a window expired at 06:00. It is also the rung that must keep working
-with the Cerbo down, so nothing above it may depend on anything arriving over MQTT.
+The clock is read first because a `Switch.Set` overrides `follow` until the next input edge.
+The window rule — one hour in six, in shortage only, guarded on buffer temperature — and the
+reasoning behind both are in [CONTROLS.md](CONTROLS.md#dhw).
 
-**The shortage DHW window:** the rule — one hour in six, in shortage only, guarded on buffer
-temperature — and the reasoning are in [CONTROLS.md](CONTROLS.md#dhw). What this script holds:
-- `config.window.slotHours`, compared against the first two characters of `sys.time` rather
-  than parsed. They are wall-clock times, so a device that has never reached an NTP server
-  runs no scheduled slots; `config.window.entryWindowLength` is an interval and still works
-- `config.window.minBufferTemp`, against the higher of buffer top (`temperature/100`) and
-  boiler flow (`temperature/103`). Neither is read as cold before it has arrived, and with
-  only one arriving the guard runs on that one alone
-- `temperature/100/Connected`, the only thing that says a buffer reading has stopped being
-  measured. At 0 — or with no reading past `config.startupGrace`, measured from the last
-  connect — the window runs unguarded
-- `state.windowKey` and `state.windowLatched`, the flag that holds the enable closed for the
-  rest of a window. Set once per poll, in the same check that commands the relay, and carried
-  across two windows that touch. See [Dwell Timers](#dwell-timers) for why it is not one
+- **`config.window.slotHours`** — 05, 11, 17 and 23 — is compared against the first two
+  characters of `sys.time` rather than parsed. They are wall-clock times, so a device that has
+  never reached an NTP server runs no scheduled slots; `config.window.entryWindowLength` is an
+  interval and still works.
+- **The guard** takes the higher of buffer top (`temperature/100`) and boiler flow
+  (`temperature/103`). Neither is read as cold before it has arrived, and with only one
+  arriving the guard runs on that one alone.
+- **`temperature/100/Connected`** is the only thing that says a buffer reading has stopped
+  being measured. At 0 — or with no reading past `config.startupGrace`, measured from the last
+  connect — the window runs unguarded.
+- **`state.windowKey` and `state.windowLatched`** hold the enable closed for the rest of a
+  window. Set once per poll, in the same check that commands the relay, and carried across two
+  windows that touch.
+- **On a restart** the contact is found wherever the last run left it and nothing is written
+  down. A relay found closed is left alone while any followed reading is outstanding; past
+  `config.startupGrace`, silence is taken at face value. A restart part way through a shortage
+  reads as entering one and opens an entry window, which costs at most an extra guarded hour.
 
-**A restart** finds the contact wherever the last run left it and nothing written down. A
-relay found closed is left alone while any followed reading is outstanding; past
-`config.startupGrace`, silence is taken at face value. A restart part way through a shortage
-reads as entering one and opens an entry window, which costs at most an extra guarded hour.
+**What it reads.** Four subscriptions: .209's `switch:0` status, `temperature/100/Temperature`,
+`temperature/103/Temperature` and `temperature/100/Connected`. Both temperatures are
+self-announcing; the lock and the bridge state are not, so those are asked for — see
+[Seeding State From Other Devices](#seeding-state-from-other-devices). Following the lock
+rather than deriving shortage is what keeps the count at four
+([ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md)). Its own `input:0`
+it reads locally.
 
-**MQTT Subscriptions:** four — the heat pump lock, buffer top, boiler flow and the bridge
-behind the last two. Following the lock rather than deriving shortage is what keeps it there;
-see [ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md). Both
-temperatures are self-announcing; the lock and the bridge state are not, so those are asked
-for — see [Seeding State From Other Devices](#seeding-state-from-other-devices).
+**What it requires.**
+- The one device it belongs on, matched on the ID it reports at startup. .164 is next door in
+  the same cupboard and its relay looks identical, so an unrecognised device runs nothing at
+  all and leaves the time clock passing through in hardware.
+- `follow` with `initial_state: "match_input"` — see the relay configuration table in
+  [CONTROLS.md](CONTROLS.md#relay-configuration).
+- `status_ntf` in the device's MQTT config. The script asserts it, rebooting once if it was
+  off, since .164 reads this device's `input:0` for its DHW demand rung.
+- A synchronised clock for the scheduled slots: `sys.time` is null until the device has
+  actually reached an NTP server.
 
-**Configuration:**
-- One device, matched on the ID it reports at startup. .164 is next door in the same cupboard
-  and its relay looks identical, so an unrecognised device runs nothing at all and leaves the
-  time clock passing through in hardware
-- Requires the relay to be `follow` with `initial_state: "match_input"` — see the relay
-  configuration table in [CONTROLS.md](CONTROLS.md)
-- `sys.time` is what the slots are read from, and it is null until the device has actually
-  reached an NTP server — a clock the device did not invent, as the exercise run needs on .164
+**Configuration.** `config.window` carries the slots, the entry window length and the
+temperature guard; `config.heatPumpLock` the status and command topics of the device it
+follows; `config.device` the ID and name.
 
-**Virtual Components:**
-- `text:200` - Status display
+**Virtual components.** `text:200`, the status display.
 
 ---
 
@@ -471,7 +439,7 @@ everything:
 - An empty-payload keepalive on connect, sent from a later turn of the script's main loop
   than the subscriptions. `MQTT.subscribe` is only acted on once the script yields, so a
   request made in the same breath is answered before anything is listening. The length of
-  the delay is immaterial — a millisecond would do.
+  the delay is immaterial — a millisecond would do, and the constant is 1 s.
 - Every 30 seconds after that with `suppress-republish`, *unless* a rarely-changing value
   the controller gates on has still not arrived, in which case it keeps asking for the full
   republish. `vebus/276/State` changes when a generator runs, months apart, and the boiler
@@ -487,39 +455,6 @@ Scripts create virtual components for:
 
 ### Event-Driven Architecture
 Scripts use `Shelly.addEventHandler()` and `Shelly.addStatusHandler()` to react to changes immediately rather than polling.
-
-### Dwell Timers
-`soc-relay-controller.js` has none. A year of logged SOC replayed against its thresholds with
-no timers gives under five relay operations a day — decades inside the relay's rating — and
-SOC cannot chatter the way the old frequency signal could, because a load coming on bends the
-slope of an integral rather than cancelling the reading.
-
-`config.relays[].pollOffset` is not one. A dwell holds a decision that has already been
-taken; the offset only moves *when* each relay takes its own, so that a heat pump lock
-closing — or the manual time switch closing — does not enable every immersion against the
-same inverter reading. Both of those shed on the edge, unchanged: only enabling waits. The
-lead relay is never held back, since it answers the time switch in hardware.
-
-The slot is anchored to wall clock — a relay polls when `unixtime` modulo the interval comes
-round to its offset — so the offsets separate the relays however far apart their scripts
-started. A device whose clock has never synchronised falls back to phasing from its own
-start. See [CONTROLS.md](CONTROLS.md).
-
-`surplus-dump-controller.js` keeps a symmetric **`minChangeTime`** (10 minutes) per stage for
-a different reason: its allocator needs each stage's state to stand still long enough to
-budget against — a locked stage that is on consumes its nominal power whether or not it has
-been re-measured.
-
-`heating-relay-controller.js` keeps an asymmetric **`minimumOnTime`** (60 minutes), the only
-one-directional rule of the three. A dump load's whole value is that shedding it is free,
-which is why `soc-relay` dropped the minimum on time it used to have; a boiler that may
-already have begun an ignition cycle is the opposite case, and only in one direction. So
-nothing delays the release and nothing but time withdraws it.
-
-`dhw-controller.js`'s window latch is none of these. It holds no clock and expires at no
-interval: the window ends when the hour does, and the flag only records that the enable has
-already closed within it, so a guard falling back through 60 °C does not shut the zone valves
-in the middle of a slot the buffer was hot enough to start.
 
 ### MQTT Subscription Budget
 A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions`
@@ -551,17 +486,8 @@ the answer. `soc-relay-controller.js` asks the lead relay for its time switch in
 per device rather than per stage; `heating-relay-controller.js` asks .209 for the heat pump
 lock and .123 for the DHW time clock; `dhw-controller.js` asks .209 for the same lock.
 
-Surplus keeps a bounded wait behind that ask, `statusSeedTimeout`: it will not disturb loads
-already running before every stage has reported, but past the bound the silent stages are
-assumed off and the rest controlled anyway, or one idle immersion holds every other load
-off. Commanding a stage into the position it is already in is a no-op, so guessing wrong is
-cheap.
-
-What a drop does to a flag differs by what the value is for. Clearing it makes the reading
-unknown afterwards rather than merely old, which is right for anything that may have moved
-while the broker was away — a time switch, a stage someone reached for by hand. The heat
-pump lock's flag is kept instead, because an absent lock sheds nothing: forgetting it would
-shed four immersions on a broker blip, and silence is not .209 saying the battery recovered.
+What a broker drop does to a followed reading differs by what the reading is for, and the
+rule is in [CONTROLS.md](CONTROLS.md#who-decides-and-how-the-decision-travels).
 
 ---
 
@@ -594,7 +520,7 @@ let config = {
 2. **soc-relay-controller.js** - Run on multiple 1PM devices with lead relay coordination
 3. **thermal-dump-controller.js** - Run on 2PM controlling pump/fan for heat recovery
 
-How these are combined at Muttonhall, including the thresholds each instance runs, is in [CONTROLS.md](CONTROLS.md).
+How these are combined at Muttonhall is in [CONTROLS.md](CONTROLS.md). The thresholds each instance runs are the `config` table in the script itself, and nowhere else.
 
 ---
 
