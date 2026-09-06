@@ -475,8 +475,11 @@ function processMqttMessage(topic, message) {
     if (relativeTopic === config.victron.inverterOutput) {
       state.inverterOutput = parseFloat(payload.value);
 
-      // Fast-path emergency suppression if inverter output exceeds safe limit
-      if (state.initialized && state.inverterOutput > config.dumpLoad.emergencyInverterLimit) {
+      // Shedding needs no seeding: a stage that has reported itself on is one this can
+      // turn off, and a stage that has not reported is one no path could shed anyway. The
+      // seeding this used to wait for is what stops an uninformed controller *enabling*,
+      // and nothing here enables.
+      if (state.inverterOutput > config.dumpLoad.emergencyInverterLimit) {
         logDebug("EMERGENCY: Inverter output " + state.inverterOutput.toFixed(0) +
                 "W exceeds " + config.dumpLoad.emergencyInverterLimit + "W limit - suppressing all loads");
         suppressAllLoads("Inverter overload protection");

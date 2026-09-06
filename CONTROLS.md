@@ -269,6 +269,12 @@ this site where shedding a dump load waits, and it is not a safety rule: the all
 a stage at its nominal power, so it needs the stage to stand still long enough to be budgeted
 against. A stage moving faster than its meter reads is one the next allocation counts wrong.
 
+The floor under it is `minSurplus`: below 100 W of available power every stage goes off, lock
+or no lock. That is less an exception than the point at which the rule stops applying.
+Available already has the dumps' own draw added back, so falling under 100 W means generation
+has dropped a full stage below what is running — the battery carrying the dumps, rather than
+the threshold being grazed that the lock exists for.
+
 **Overload risk, still open.** The surplus controller enforces an inverter contribution limit
 for its own loads, and each DHW immersion controller has a generation gate and a headroom
 check, but the two operate independently. With several dump loads active on high generation

@@ -543,6 +543,40 @@ test("an immersion still checks inverter headroom before enabling", () => {
   assert.deepStrictEqual(switchCommands(calls), []);
 });
 
+// The fast path only fires on a relay this script knows is closed, at the moment the
+// reading arrives. The poll is what covers the rest: a relay closed since by the
+// hardware follow, and every enable underneath, which the early return blocks for as
+// long as the overload stands.
+
+test("the poll sheds an overload the fast path was in no position to see", () => {
+  const { mod, calls } = loadImmersion();
+  settle(mod, false);
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "batterySOC", 99);
+  victron(mod, "inverterOutput", 14000); // arrives with the relay open: nothing to shed
+
+  assert.deepStrictEqual(switchCommands(calls), []);
+
+  settle(mod, true); // closed since, by the lead relay's follow rather than by this script
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [false]);
+});
+
+test("a standing overload blocks the time switch, which nothing below it does", () => {
+  const { mod, calls } = loadImmersion();
+  settle(mod, false);
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "acGeneration", 5000);
+  victron(mod, "batterySOC", 99);
+  victron(mod, "inverterOutput", 14000);
+  mod.state.inputIsActive = true;   // the strongest enable this relay has
+
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "hot water on demand still does not mean 2.7 kW onto an inverter already over");
+});
+
 test("an immersion sheds the moment SOC falls", () => {
   const { mod, calls } = loadImmersion();
   settle(mod, true);

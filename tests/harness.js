@@ -26,12 +26,21 @@ const EXPORTED = [
   "state",
   // surplus-dump-controller
   "calculateDesiredState",
+  "calculateAvailablePower",
+  "calculateMaxDumpPower",
   "suppressAllLoads",
+  "isLoadLocked",
+  "isEvChargingInAuto",
   "applyDesiredState",
   "sendRemoteSwitchCommand",
   "getDumpLoadPower",
   // thermal-dump-controller
   "isLoadStalled",
+  "setupEventHandlers",
+  "getOutput",
+  "turnOutputOn",
+  "turnOutputOff",
+  "updateOutputStates",
   "isDumpLoadStalled",
   "getDumpLoadState",
   // soc-relay-controller
@@ -109,8 +118,10 @@ function load(scriptName, deviceId) {
       // a KVS read, where "no such key" is itself the interesting case - can
       // invoke it as the device would.
       call: function (method, params, cb) { calls.push({ method, params, cb }); },
-      addStatusHandler: function () {},
-      addEventHandler: function () {},
+      // Recorded, so a test can deliver a device event - a relay moved at the
+      // switch, or the firmware answering an RPC - the way the device would.
+      addStatusHandler: function (fn) { handlers.status = fn; },
+      addEventHandler: function (fn) { handlers.event = fn; },
       getComponentStatus: function () { return null; },
       getComponentConfig: function () { return null; },
       getDeviceInfo: function () {

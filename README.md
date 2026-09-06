@@ -219,11 +219,15 @@ Priority, first match wins:
   AC consumption minus AC-coupled generation, with a fast-path shutoff at
   `dumpLoad.emergencyInverterLimit` (13 kW). Why DC-coupled generation adds to available
   power without reducing inverter load is in [POWER.md](POWER.md).
-- **EVSE coordination:** reserves headroom while the charger is in auto mode, being max EVSE
-  power minus actual EVSE draw.
-- **Anti-oscillation:** 150 W hysteresis on available power, a 5% minimum dimmer change, and
-  a floor function that biases towards slight underutilisation.
-- **`dumpLoad.minChangeTime`,** 10 minutes per stage and symmetric — see
+- **EVSE coordination:** while the charger is in auto mode, reserves its next step — 2 A at
+  230 V, or what the charger can still take if that is less — and holds back no battery
+  headroom.
+- **`dumpLoad.batteryHeadroom`,** 200 W, kept back for parasitic loads and a trickle charge,
+  except while the EVSE is charging in auto.
+- **Anti-oscillation:** a `dumpLoad.minChangePercent` (2%) minimum dimmer change, and a floor
+  function that biases towards slight underutilisation.
+- **`dumpLoad.minChangeTime`,** 10 minutes per stage, both directions, except that available
+  power below `dumpLoad.minSurplus` sheds regardless — see
   [CONTROLS.md](CONTROLS.md#dump-loads-today).
 - **`statusSeedTimeout`,** 90 seconds: loads already running are not disturbed until every
   stage has reported, and past the bound the silent stages are assumed off and the rest

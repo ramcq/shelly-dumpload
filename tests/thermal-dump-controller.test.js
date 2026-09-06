@@ -382,3 +382,121 @@ test("the status line tells an unheard boiler from a stopped one", () => {
   victron(mod, "boilerOperating", BOILER_STOPPED);
   assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("Boiler:OFF") >= 0);
 });
+
+// ===== Intended state, and why the handler reads it =====
+//
+// Two things move these relays: this script, and the firmware acting on the
+// device's own input. Both arrive back as the same toggle event, and the handler
+// used to answer every one of them by reading the switch over RPC and running the
+// control logic - inside an event handler, which is how an RPC callback came to
+// re-enter it. Recording what was asked for before asking for it makes the two
+// tellable apart without a call: a toggle that matches the intention is this
+// script's own echo and stops there, and only a toggle that does not is a change
+// to reconcile.
+
+// The handler the device would deliver events to. finishSetup() installs it, and
+// finishSetup does not run under the harness, so a test installs it directly.
+function eventHandler(loaded) {
+  loaded.mod.setupEventHandlers();
+  return loaded.handlers.event;
+}
+
+function toggle(id, on) {
+  return { name: "switch", info: { event: "toggle", id: id, state: on } };
+}
+
+test("a toggle this controller asked for is its own echo and stops there", () => {
+  const loaded = loadThermal();
+  const fire = eventHandler(loaded);
+  loaded.mod.turnOutputOn(0, "test");   // sets intended, RPC never answers
+
+  const log = captureLog(() => fire(toggle(0, true)));
+
+  assert.strictEqual(loaded.mod.getOutput(0).on, true, "the actual state still follows");
+  assert.ok(log.indexOf("Fan Coil changed") !== -1, log);
+  assert.ok(log.indexOf("Monitoring") === -1,
+    "running the control logic from inside the event it caused is the re-entrancy: " + log);
+});
+
+test("a relay moved at the device is reconciled instead", () => {
+  const loaded = loadThermal();
+  const fire = eventHandler(loaded);
+  // Nothing was asked for, so intended is false and a relay that has come on is
+  // somebody else's doing - the thermostat wired to the fan coil, most likely.
+
+  const log = captureLog(() => fire(toggle(0, true)));
+
+  assert.strictEqual(loaded.mod.getOutput(0).on, true);
+  assert.strictEqual(loaded.mod.getOutput(0).intended, true,
+    "the intention is resynced, or every later echo reads as external too");
+  assert.ok(log.indexOf("changed externally") !== -1, log);
+  assert.ok(log.indexOf("Monitoring") !== -1,
+    "an external change is the one thing that does need reconciling: " + log);
+});
+
+test("an unknown switch id is ignored rather than reconciled", () => {
+  const loaded = loadThermal();
+  const fire = eventHandler(loaded);
+
+  const log = captureLog(() => fire(toggle(7, true)));
+
+  assert.ok(log.indexOf("unknown switch ID") !== -1, log);
+  assert.ok(log.indexOf("Monitoring") === -1, log);
+});
+
+test("startup takes the intention from the relay, so the first toggle is not read as external", () => {
+  const loaded = loadThermal();
+  global.Shelly.getComponentStatus = function () { return { output: true }; };
+  loaded.mod.updateOutputStates();
+
+  loaded.mod.state.outputs.forEach((o) => {
+    assert.strictEqual(o.intended, true,
+      "a relay found closed was intended closed by whatever closed it; assuming " +
+      "otherwise makes the next echo a reconciliation");
+  });
+  global.Shelly.getComponentStatus = function () { return null; };
+});
+
+// ===== Minimum run time =====
+//
+// Five minutes, and it is one-directional like the boiler's: starting the fan coil
+// and pump costs nothing, stopping them a minute later means the heat they moved
+// is still in the coil and the immersion that cut out has not cooled enough to
+// reset. Nothing delays a start.
+
+test("an output that has just started is not stopped inside five minutes", () => {
+  const { mod, calls } = loadThermal();
+  const output = mod.getOutput(0);
+  output.on = true;
+  output.intended = true;
+  output.onTime = Date.now() - 60 * 1000;
+
+  mod.turnOutputOff(0, "test");
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the RPC is not sent at all, so the intention is not moved either");
+  assert.strictEqual(output.intended, true);
+});
+
+test("past five minutes it stops", () => {
+  const { mod, calls } = loadThermal();
+  const output = mod.getOutput(0);
+  output.on = true;
+  output.intended = true;
+  output.onTime = Date.now() - mod.config.minRunTime - 1000;
+
+  mod.turnOutputOff(0, "test");
+
+  assert.deepStrictEqual(switchCommands(calls), [{ id: 0, on: false }]);
+  assert.strictEqual(output.intended, false,
+    "intended moves before the RPC, so the echo that comes back is recognised");
+});
+
+test("nothing delays a start", () => {
+  const { mod, calls } = loadThermal();
+  mod.getOutput(0).onTime = Date.now();
+
+  mod.turnOutputOn(0, "test");
+
+  assert.deepStrictEqual(switchCommands(calls), [{ id: 0, on: true }]);
+});
