@@ -27,10 +27,14 @@ the document that owns it, with a link to it from here.
 
 ## Code and commits
 
-- A **commit** says why *this change*. Reasoning that outlives the change moves to a document.
+- A **commit** says what changed and why *this change*, in a body of about 3-8 lines. Reasoning
+  that outlives the change moves to a document.
 - **Code** says what it does and points at the document. `dhw-controller.js:1-12` is the shape.
+  A comment is a line or two; a constant gets a trailing unit and meaning, not a paragraph.
 
 Write plainly, in the fewest words that carry the reason, using the term CONTEXT.md defines.
+State; don't argue, tell anecdotes, or coin terms. A document section should read as rules
+and their reasons, not as the history of how they were reached.
 
 ## Running things
 

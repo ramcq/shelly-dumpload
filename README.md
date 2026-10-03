@@ -129,7 +129,7 @@ dump load concern, which the shortage lead drops:
   site an AC input in use is one generator or another, which takes VE.Bus into Power Assist,
   Bulk, Absorption, Float, Passthru or external control; off, faulted and bypassed are the
   rest of what is not state 9. Why the state is read rather than the generator service is in
-  [CONTROLS.md](CONTROLS.md#why-vebus-state-rather-than-the-generator-is-running).
+  [CONTROLS.md](CONTROLS.md#shortage).
 - **Shortage**, computed on .209 only, is `config.shortage`: a latch on SOC with the VE.Bus
   term overlaid rather than gating it, settled by generation where it has never been
   resolved, and nothing heard from the Cerbo means no action either way for
@@ -226,7 +226,7 @@ Priority, first match wins:
   function that biases towards slight underutilisation.
 - **`dumpLoad.minChangeTime`,** 10 minutes per stage, both directions, except that available
   power below `dumpLoad.minSurplus` sheds regardless — see
-  [CONTROLS.md](CONTROLS.md#dump-loads-today).
+  [CONTROLS.md](CONTROLS.md#dump-loads-together).
 - **`statusSeedTimeout`,** 90 seconds: loads already running are not disturbed until every
   stage has reported, and past the bound the silent stages are assumed off and the rest
   controlled anyway. Commanding a stage into the position it is already in is a no-op.
@@ -371,8 +371,8 @@ reasoning behind both are in [CONTROLS.md](CONTROLS.md#dhw).
   reads as entering one and opens an entry window, which costs at most an extra guarded hour.
 
 **What it reads.** Four subscriptions: .209's `switch:0` status, `temperature/100/Temperature`,
-`temperature/103/Temperature` and `temperature/100/Connected`. Both temperatures are
-self-announcing; the lock and the bridge state are not, so those are asked for — see
+`temperature/103/Temperature` and `temperature/100/Connected`. The temperatures
+arrive unasked; the lock and the bridge state are silent signals, so those are asked for — see
 [Seeding State From Other Devices](#seeding-state-from-other-devices). Following the lock
 rather than deriving shortage is what keeps the count at four
 ([ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md)). Its own `input:0`
