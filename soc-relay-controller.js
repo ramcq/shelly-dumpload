@@ -233,25 +233,6 @@ function updateShortageLatch() {
   }
 }
 
-// Restore the latch from the relay contact, unless its source is `init` (initial_state at
-// boot, not a command). See CONTROLS.md#shortage.
-function seedLatchFromRelay() {
-  if (!state.isShortageLead) {
-    return;
-  }
-
-  let switchStatus = Shelly.getComponentStatus("switch:0");
-
-  if (!switchStatus || switchStatus.source === "init") {
-    logDebug("Nothing has commanded the contact - no latch to read");
-    return;
-  }
-
-  state.shortageLatch = !state.relayIsOn;
-  console.log("Latch read from the relay contact: " +
-             (state.shortageLatch ? "shortage" : "no shortage"));
-}
-
 // Shortage: VE.Bus not inverting, or the latch (unresolved counts as shortage).
 // Null if there is no reading yet.
 function inShortage() {
@@ -454,7 +435,6 @@ function determineDeviceIdentity() {
   }
 
   assignFollowedTopics();
-  seedLatchFromRelay();
   state.identityKnown = true;
 
   if (state.isShortageLead) {

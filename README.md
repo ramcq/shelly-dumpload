@@ -81,8 +81,8 @@ wins:
 
 - **VE.Bus state** also covers the AC inputs: a generator on either takes VE.Bus out of 9.
 - **Shortage** (.209 only): `config.shortage` (30% / 90%), VE.Bus state and
-  `minGenerationPower`, per [CONTROLS.md](CONTROLS.md#shortage). At startup .209 reads its
-  latch off its relay contact, unless the switch's last-command `source` is `init`.
+  `minGenerationPower`, per [CONTROLS.md](CONTROLS.md#shortage). The latch starts
+  unresolved.
 - **Generation gate:** no enable below `minGenerationPower` (500 W) of AC- plus DC-coupled
   generation. On .209 the same figure resolves an unresolved latch.
 - **Headroom check:** inverter output plus `inverter.heaterPower` (2700 W) under

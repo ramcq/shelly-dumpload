@@ -17,7 +17,7 @@ readings:
 | SOC at or below **30%** | Latch on |
 | SOC at or above **90%** | Latch off |
 | Between the two | The latch holds |
-| Latch never resolved since boot | Shortage, until generation exceeds **500 W** |
+| Latch never resolved since the script started | Shortage, until generation exceeds **500 W** |
 | No reading yet, within five minutes of starting | No action either way |
 
 Neither the Cerbo nor a Shelly script keeps history, so nothing here uses averages or
@@ -47,12 +47,12 @@ overload starts the generator, which takes VE.Bus out of Inverting.
 VE.Bus sits outside the latch, so a generator run that ends mid-band returns the system to
 whatever the latch said, rather than holding the heat pump locked until 90%.
 
-**The latch survives a script restart on the relay contact.** At startup .209 reads its relay
-back as the latch, unless the switch's last-command source is `init` (the `initial_state` at
-boot, not a decision). On a fresh boot between the thresholds it cannot know which way the
-battery was going, so it assumes shortage until it sees more than 500 W of hydro or solar. A
-mid-band battery with no renewable generation is what a degraded system looks like between
-generator runs, when VE.Bus is back to Inverting and nothing else would catch it.
+**The latch lives in RAM and starts unresolved.** A reboot or a redeploy between the
+thresholds cannot know which way the battery was going, so .209 assumes shortage until it sees
+more than 500 W of hydro or solar. A mid-band battery with no renewable generation is what a
+degraded system looks like between generator runs, when VE.Bus is back to Inverting and nothing
+else would catch it. The relay contact is not read back: on a reboot it holds only
+`initial_state`, and a redeploy is chosen, so the same rule serves both.
 
 **There are no dwell timers.** A year of logged SOC replayed against these thresholds gives
 under five relay operations a day. VE.Bus does not chatter either: 31 excursions in 184
@@ -285,7 +285,7 @@ existing controls, what the system did before the Shelly; for a dump load, off.
 
 | Relay | Configuration | Unscripted behaviour |
 |---|---|---|
-| Heat Pump Enable (.209) | `detached`, `initial_state: "on"`, no `auto_on`/`auto_off` | Heat pump runs. Nothing is wired to its input, so `match_input` would lock it out on every power cycle. A device timer would look like a decision to the latch read-back |
+| Heat Pump Enable (.209) | `detached`, `initial_state: "on"`, no `auto_on`/`auto_off` | Heat pump runs. Nothing is wired to its input, so `match_input` would lock it out on every power cycle |
 | Boiler Release (.164) | `follow`, `match_input` | H1 releases the boiler in hardware. The relay is normally-open and cannot be a changeover |
 | DHW Enable (.123) | `follow`, `match_input` | The time clock passes straight through |
 | Buffer immersions (.65, .161) | `detached`, `initial_state: "off"` | Nothing dumps; an input edge cannot override the controller |

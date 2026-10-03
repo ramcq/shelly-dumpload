@@ -816,57 +816,6 @@ test("the poll offsets separate the tanks, not the devices", () => {
     "the shortage lead has no dump load to space out, and everything else waits on it");
 });
 
-// ===== The latch has one durable copy, and .209 keeps it =====
-
-// A source of `init` means initial_state at boot, not a command
-test("the shortage lead reads its latch off its own relay contact", () => {
-  const { mod } = loadShortageLead();
-  mod.state.relayIsOn = true; // the contact says: heat pump running, no shortage
-  global.Shelly.getComponentStatus = function (key) {
-    return key === "switch:0" ? { output: true, source: "MQTT" } : null;
-  };
-
-  mod.seedLatchFromRelay();
-
-  assert.strictEqual(mod.state.shortageLatch, false,
-    "a redeploy discarded the one durable copy of the latch and assumed shortage");
-});
-
-test("a contact nothing has commanded is not a decision", () => {
-  const { mod } = loadShortageLead();
-  mod.state.relayIsOn = true;
-  global.Shelly.getComponentStatus = function (key) {
-    return key === "switch:0" ? { output: true, source: "init" } : null;
-  };
-
-  mod.seedLatchFromRelay();
-
-  assert.strictEqual(mod.state.shortageLatch, null,
-    "initial_state was read as a released heat pump");
-});
-
-test("a contact it cannot read is not a decision either", () => {
-  const { mod } = loadShortageLead();
-  mod.state.relayIsOn = true;
-
-  mod.seedLatchFromRelay(); // the harness reports no switch status
-
-  assert.strictEqual(mod.state.shortageLatch, null);
-});
-
-test("an immersion keeps no latch to read", () => {
-  const { mod } = loadImmersion();
-  mod.state.relayIsOn = true;
-  global.Shelly.getComponentStatus = function (key) {
-    return key === "switch:0" ? { output: true, source: "MQTT" } : null;
-  };
-
-  mod.seedLatchFromRelay();
-
-  assert.strictEqual(mod.state.shortageLatch, null,
-    "an immersion's relay means hot water, not shortage");
-});
-
 // ===== What .209 says it is doing =====
 
 test("the shortage lead claims no shortage it has not established", () => {

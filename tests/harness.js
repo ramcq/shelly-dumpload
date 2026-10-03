@@ -44,7 +44,6 @@ const EXPORTED = [
   "recordSwitchTime",
   "assignFollowedTopics",
   "requestFollowedStatus",
-  "seedLatchFromRelay",
   "determineDeviceIdentity",
   "finishSetup",
   // heating-relay-controller

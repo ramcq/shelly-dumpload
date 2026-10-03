@@ -25,8 +25,8 @@ override.
 
 ## Consequences
 
-- The latch and its terms live on .209 only, and .209's relay contact holds the latch across a
-  script restart (see [CONTROLS.md](../../CONTROLS.md#shortage)).
+- The latch and its terms live on .209 only, in RAM. A restart starts it unresolved (see
+  [CONTROLS.md](../../CONTROLS.md#shortage)).
 - Followers depend on .209. Without it each keeps its own behaviour: the immersions keep their
   SOC band, generation gate and VE.Bus gate; .164 still gets H1 in hardware; .123 still
   passes the time clock through in hardware.
