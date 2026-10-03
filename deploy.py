@@ -205,8 +205,8 @@ Configuration file format (one deployment per line):
   DEVICE_IP:SCRIPT_ID:SCRIPT_FILE:SCRIPT_NAME
 
 Example deploy.conf:
-  192.168.1.100:1:smart-load-controller.js:Smart Load
-  192.168.1.101:1:thermal-dump-controller.js:Thermal Dump
+  192.168.1.90:1:soc-relay-controller.js:SOC Relay
+  192.168.1.156:1:thermal-dump-controller.js:Thermal Dump
   # Lines starting with # are comments
         '''
     )

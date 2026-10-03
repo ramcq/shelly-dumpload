@@ -187,8 +187,8 @@ is how devices follow one another.
 
 > **These publications are on change, and are not retained.** A subscriber that connects
 > between two edges learns nothing until the next one, so any controller that follows another
-> device must seed its view with an HTTP `Switch.GetStatus` at startup rather than wait. This
-> applies to the existing lead relay follow as much as to anything new.
+> device asks for its state at startup by publishing `status_update` to the device's
+> `<device-id>/command` topic, which republishes every component.
 
 What a controller does about that gap is the script's business — see the subscription and
 seeding patterns in [README.md](README.md); relay `in_mode` and `initial_state` are set out
