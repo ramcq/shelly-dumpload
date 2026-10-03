@@ -184,13 +184,6 @@ function refreshUptime() {
   }
 
   state.nowUptime = sys.uptime * 1000;
-
-  // The anchor is stamped by the first reading there is, not by the first attempt. A script
-  // whose opening read failed would otherwise date itself to zero and find, on the next
-  // reading, that a device up five days had run out its grace before it subscribed.
-  if (state.startedAtUptime === null) {
-    state.startedAtUptime = state.nowUptime;
-  }
 }
 
 refreshUptime();
