@@ -89,8 +89,9 @@ let config = {
   // listening. The length hardly matters - a millisecond would do - only that it lands on
   // a later turn of the loop.
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
-  startupGrace: 3 * 60 * 1000,  // ms - how long the VE.Bus gate waits for its first reading
-                                // before treating silence as trouble. Covers a Cerbo boot
+  startupGrace: 5 * 60 * 1000,  // ms - how long the VE.Bus gate waits for its first reading
+                                // before treating silence as trouble. Five minutes,
+                                // for the reason in CONTROLS.md
   checkInterval: 30 * 1000,     // 30 seconds in milliseconds
 
   // Minimum generation required to enable dump loads (W)
@@ -132,8 +133,13 @@ let state = {
   leadRelayTopic: "",        // MQTT topic to monitor for lead relay input
   lockTopic: "",             // MQTT topic to monitor for the heat pump lock
 
+  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
+  // below the state literal.
+  nowUptime: null,           // Uptime at the start of this pass, or null
+                             // while the clock has never been read
+  startedAtUptime: null,     // Uptime when this script started, for the startup grace
+
   // Relay control state
-  startedAt: Date.now(),     // When this script started, for the startup grace
   identityKnown: false,      // Whether this device knows which role it is running
   relayIsOn: false,          // Current relay state (actual)
   intendedRelayOn: false,    // Intended relay state (prevents re-entrancy)
@@ -170,6 +176,49 @@ let state = {
   // Timer
   timerId: null
 };
+
+// ===== Elapsed time =====
+//
+// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
+// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
+// entry points the device calls; an unreadable `sys` leaves the last value standing.
+function refreshUptime() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || sys.uptime === undefined) {
+    return;
+  }
+
+  state.nowUptime = sys.uptime * 1000;
+
+  // The anchor is stamped by the first reading there is, not by the first attempt. A script
+  // whose opening read failed would otherwise date itself to zero and find, on the next
+  // reading, that a device up five days had run out its grace before it subscribed.
+  if (state.startedAtUptime === null) {
+    state.startedAtUptime = state.nowUptime;
+  }
+}
+
+// Read here rather than in init(), so the grace covers this script's own startup as well
+// as the wait for the Cerbo.
+refreshUptime();
+
+// Whether `sinceUptime` is still inside the startup grace. An interval that cannot be
+// measured has not elapsed, so a clock never read keeps everything waiting rather than
+// declaring a grace it never timed to be over.
+function withinGrace(sinceUptime) {
+  if (state.nowUptime === null || sinceUptime === null) {
+    return true;
+  }
+
+  return state.nowUptime - sinceUptime < config.startupGrace;
+}
+
+// This run is still new enough that a reading it has never had is only one that has not
+// arrived yet.
+function withinStartupGrace() {
+  return withinGrace(state.startedAtUptime);
+}
 
 // ===== Virtual component handles =====
 let handles = {
@@ -294,7 +343,7 @@ function inShortage() {
   if (!state.vebusReceived) {
     // The first poll happens before MQTT has connected and the Cerbo boots slower than the
     // Shelly, so silence is only trouble once the grace has run out.
-    return (Date.now() - state.startedAt < config.startupGrace) ? null : true;
+    return withinStartupGrace() ? null : true;
   }
 
   if (state.vebusState !== 9) {
@@ -1014,6 +1063,10 @@ function canSafelyEnable() {
 }
 
 function checkSystemState() {
+  // Every entry into the control logic takes its own reading of the clock, because the MQTT
+  // handlers reach this directly as well as the poll does.
+  refreshUptime();
+
   updateShortageLatch();
   updateStatus("Monitoring");
 
@@ -1096,7 +1149,7 @@ function checkSystemState() {
   if (state.vebusState !== 9) {
     // An absent reading is not a stale one: a script that has just started has none yet.
     // Past the grace, silence is the trouble this gate exists for.
-    if (!state.vebusReceived && Date.now() - state.startedAt < config.startupGrace) {
+    if (!state.vebusReceived && withinStartupGrace()) {
       logDebug("No VE.Bus state yet, within startup grace - no action");
       return;
     }

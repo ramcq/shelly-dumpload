@@ -13,7 +13,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, captureLog } = require("./harness.js");
+const { load, captureLog, advanceClock, uptimeMs, withJumpedWallClock } =
+  require("./harness.js");
 
 const DHW = "dhw-controller.js";
 
@@ -71,7 +72,10 @@ function timeClock(mod, calling) {
 // scheduled slots rest on.
 function clockAt(hhmm) {
   global.Shelly.getComponentStatus = function (key) {
-    return key === "sys" ? { time: hhmm, unixtime: 1756000000, last_sync_ts: 1755999000 } : null;
+    return key === "sys"
+      ? { uptime: uptimeMs() / 1000,
+          time: hhmm, unixtime: 1756000000, last_sync_ts: 1755999000 }
+      : null;
   };
 }
 
@@ -79,7 +83,9 @@ function clockAt(hhmm) {
 // the dangerous shape of wrong, but no local time at all.
 function clockUnsynchronised() {
   global.Shelly.getComponentStatus = function (key) {
-    return key === "sys" ? { time: null, unixtime: null, last_sync_ts: null } : null;
+    return key === "sys"
+      ? { uptime: uptimeMs() / 1000, time: null, unixtime: null, last_sync_ts: null }
+      : null;
   };
 }
 
@@ -90,7 +96,7 @@ function clockUnsynchronised() {
 function windowConditions(mod) {
   clockAt("05:20");
   lock(mod, false);
-  mod.state.entryWindowUntil = 0;
+  mod.state.entryWindowUntilUptime = null;
   bufferTop(mod, 65);
   boilerFlow(mod, 68);
 }
@@ -102,8 +108,8 @@ function settle(mod, relayIsOn) {
 }
 
 function pastStartupGrace(mod) {
-  mod.state.startedAt = Date.now() - (mod.config.startupGrace + 1000);
-  mod.state.listeningSince = mod.state.startedAt;
+  advanceClock(mod.config.startupGrace + 1000);
+  mod.refreshUptime(); // as the next entry into the controller would
 }
 
 // What the controller commanded its own relay to do, if anything. Shelly.call never calls
@@ -491,7 +497,7 @@ test("the entry window lasts an hour", () => {
   assert.deepStrictEqual(switchCommands(calls), [true]);
   settle(mod, true);
 
-  mod.state.entryWindowUntil = Date.now() - 1000;
+  advanceClock(mod.config.window.entryWindowLength + 1000);
   mod.checkSystemState();
 
   assert.deepStrictEqual(switchCommands(calls), [true, false]);
@@ -513,7 +519,7 @@ test("an entry window running into a scheduled slot is one window, not two", () 
   bufferTop(mod, 50);   // the burn ends before the slot begins
   boilerFlow(mod, 45);
   clockAt("05:00");
-  mod.state.entryWindowUntil = Date.now() + (20 * MINUTES);
+  mod.state.entryWindowUntilUptime = mod.state.nowUptime + (20 * MINUTES);
   mod.checkSystemState();
 
   assert.deepStrictEqual(switchCommands(calls), [true],
@@ -527,13 +533,13 @@ test("a shortage that has already begun is not re-entered on every lock message"
   settle(mod, false);
   clockAt("07:30");
   lock(mod, false);
-  const openedAt = mod.state.entryWindowUntil;
-  assert.ok(openedAt > 0);
+  const openedAt = mod.state.entryWindowUntilUptime;
+  assert.ok(openedAt !== null);
 
-  mod.state.entryWindowUntil = openedAt - (30 * MINUTES);
+  mod.state.entryWindowUntilUptime = openedAt - (30 * MINUTES);
   lock(mod, false);
 
-  assert.strictEqual(mod.state.entryWindowUntil, openedAt - (30 * MINUTES),
+  assert.strictEqual(mod.state.entryWindowUntilUptime, openedAt - (30 * MINUTES),
     "a republish restarted the entry window");
 });
 
@@ -574,7 +580,7 @@ test("a blind window keeps to its slots rather than running on", () => {
   windowConditions(mod);
   bridge(mod, false);
   clockAt("07:30");
-  mod.state.entryWindowUntil = 0;
+  mod.state.entryWindowUntilUptime = null;
 
   mod.checkSystemState();
 
@@ -622,13 +628,13 @@ test("silence is blindness only past the grace, but being told is immediate", ()
   // nothing yet and its temperatures are seconds away; a bridge that says it is disconnected
   // has told us something.
   const told = loadEnable();
-  told.mod.state.listeningSince = Date.now();
+  told.mod.state.listeningSinceUptime = told.mod.state.nowUptime;
   bridge(told.mod, false);
   assert.strictEqual(told.mod.bufferUnreadable(), true,
     "being told was not believed at once");
 
   const silent = loadEnable();
-  silent.mod.state.listeningSince = Date.now();
+  silent.mod.state.listeningSinceUptime = silent.mod.state.nowUptime;
   assert.strictEqual(silent.mod.bufferUnreadable(), false,
     "a controller that had just started gave up on readings still in flight");
 
@@ -643,7 +649,7 @@ test("the silence grace runs from the reconnect, not from script start", () => {
   // expired long ago, and a poll landing in that gap would latch the window blind for the
   // hour — against a buffer that turns out to be cold a second later.
   const { mod } = loadEnable();
-  mod.state.startedAt = Date.now() - (5 * 24 * 60 * MINUTES);
+  advanceClock(5 * 24 * 60 * MINUTES);
   windowConditions(mod);
   bridge(mod, true);
 
@@ -719,7 +725,7 @@ test("a device that has never synchronised runs no scheduled slots", () => {
   bufferTop(mod, 75);
   boilerFlow(mod, 78);
   clockUnsynchronised();
-  mod.state.entryWindowUntil = 0;
+  mod.state.entryWindowUntilUptime = null;
 
   mod.checkSystemState();
 
@@ -957,4 +963,34 @@ test("a drop mid-window does not withdraw the window it was already holding", ()
   mod.checkSystemState();
 
   assert.deepStrictEqual(switchCommands(calls), [true]);
+});
+
+// ===== The clock jumping =====
+//
+// .123 arms an hour-long window on the lock's opening edge. The window is an interval
+// within the run, so it is measured on uptime. See docs/adr/0003.
+
+test("NTP landing does not cancel an entry window", () => {
+  const { mod } = loadEnable();
+  settle(mod, false);
+  clockAt("07:30");
+  lock(mod, false);
+  assert.strictEqual(mod.state.windowKey, "entry");
+
+  withJumpedWallClock(function () { mod.checkSystemState(); });
+
+  assert.strictEqual(mod.currentWindowKey(), "entry",
+    "an hour measured on the wall clock ended the moment NTP landed");
+});
+
+test("the entry window still ends, on the clock that cannot jump", () => {
+  const { mod } = loadEnable();
+  settle(mod, false);
+  clockAt("07:30");
+  lock(mod, false);
+
+  advanceClock(mod.config.window.entryWindowLength + 1000);
+  mod.checkSystemState();
+
+  assert.strictEqual(mod.currentWindowKey(), "");
 });

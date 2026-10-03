@@ -334,7 +334,8 @@ and why the ordering is the rule rather than an implementation detail, is in
   *or none that can be read*, and retried on every poll until it lands.
 - **`syncedNow()`** is `sys.unixtime` only where `sys.last_sync_ts` says the clock has
   actually been set, and the exercise run is inert without it. It is the one term measured
-  across a reboot; every other wait is timed within a single run, on `Date.now()`.
+  across a reboot; every other wait is timed within a single run, against `sys.uptime` read
+  into `state.nowUptime` once per pass.
 - **On a restart** the contact outlives the script, so a relay found closed is left alone
   while any of the readings that could justify it is still outstanding; past
   `config.startupGrace`, silence is taken at face value. Nothing else is reconstructed —

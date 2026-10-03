@@ -27,7 +27,7 @@ machine with a history:
 | Between the two | The latch holds |
 | A controller that has never resolved its latch | Shortage, until generation exceeds **500 W** |
 | Unknown or stale VE.Bus state | Counts as not inverting |
-| No reading yet, within three minutes of starting | Counts as nothing: no action either way |
+| No reading yet, within five minutes of starting | Counts as nothing: no action either way |
 
 **The latch is not an implementation detail — it is what stops the system cycling.** The
 loads shortage sheds are the same loads that move SOC, so a rule reading only the present
@@ -65,10 +65,18 @@ An absent reading is not a stale one. The controller polls immediately on start,
 MQTT has connected, so a gate that locked on the state it had not received yet would lock
 the heat pump on every redeploy — for a reading that arrives seconds later. The
 grace covers only the case of never having had a reading, and is not restored by a broker
-dropping later: once a state has been seen, silence is trouble again immediately. Three
+dropping later: once a state has been seen, silence is trouble again immediately. Five
 minutes, because after a site-wide outage the Cerbo starts booting well after the Shelly
-has finished. Without it, every redeploy would lock the heat pump and shed four immersions
-for the second or two before the first reading landed.
+has finished: a Cerbo cold boot reaches MQTT in around two and a half minutes, where a
+healthy one answers a republish in under a tenth of a second. The grace ends on the first
+reading rather than when it expires, so its length costs nothing except where there is
+nothing there to answer. Without it, every redeploy would lock the heat pump and shed four
+immersions for the second or two before the first reading landed.
+
+**The grace is measured against uptime, not the wall clock**, as is every other interval a
+controller times within one run. A stamp taken before NTP lands and compared after it reads
+as days, so the sync ends every interval stamped ahead of it — this grace among them, in
+seconds: [ADR 0003](docs/adr/0003-elapsed-time-is-measured-against-uptime.md).
 
 ### Why VE.Bus state, rather than "the generator is running"
 

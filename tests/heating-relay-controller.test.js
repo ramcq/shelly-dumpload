@@ -11,7 +11,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, captureLog } = require("./harness.js");
+const { load, captureLog, advanceClock, uptimeMs, withJumpedWallClock } =
+  require("./harness.js");
 
 const HEATING = "heating-relay-controller.js";
 
@@ -73,7 +74,8 @@ function bridge(mod, connected) {
 // a test that wants it to have been running a while says so afterwards.
 function vebusShortFor(mod, vebusState, ms) {
   victron(mod, "vebusState", vebusState);
-  mod.state.vebusShortSince = Date.now() - ms;
+  advanceClock(ms);
+  mod.refreshUptime(); // as the next entry into the controller would
 }
 
 // A controller that has heard from everything it follows, with none of it asking for heat.
@@ -90,9 +92,17 @@ function heardEverything(mod) {
 function clockAt(at) {
   global.Shelly.getComponentStatus = function (key) {
     return key === "sys"
-      ? { unixtime: Math.floor(at / 1000), last_sync_ts: Math.floor(at / 1000) - 800 }
+      ? { uptime: uptimeMs() / 1000,
+          unixtime: Math.floor(at / 1000), last_sync_ts: Math.floor(at / 1000) - 800 }
       : null;
   };
+}
+
+// Both clocks move together, the way they do on a device that is simply running: the
+// fourteen days is read off the wall clock, the hour it sets is timed within the run.
+function clockRunsTo(mod, from, to) {
+  advanceClock(to - from);
+  clockAt(to);
 }
 
 // A device that has never reached an NTP server. It still reports a date — the plausible
@@ -100,7 +110,8 @@ function clockAt(at) {
 function clockUnsynchronised(at) {
   global.Shelly.getComponentStatus = function (key) {
     return key === "sys"
-      ? { unixtime: Math.floor((at || 0) / 1000), last_sync_ts: null }
+      ? { uptime: uptimeMs() / 1000,
+          unixtime: Math.floor((at || 0) / 1000), last_sync_ts: null }
       : null;
   };
 }
@@ -110,11 +121,12 @@ function clockUnsynchronised(at) {
 function settle(mod, relayIsOn) {
   mod.state.relayIsOn = relayIsOn;
   mod.state.intendedRelayOn = relayIsOn;
-  mod.state.releasedAt = 0;
+  mod.state.releasedAtUptime = null;
 }
 
 function pastStartupGrace(mod) {
-  mod.state.startedAt = Date.now() - (mod.config.startupGrace + 1000);
+  advanceClock(mod.config.startupGrace + 1000);
+  mod.refreshUptime(); // as the next entry into the controller would
 }
 
 // What the controller commanded its own relay to do, if anything. Shelly.call never calls
@@ -282,7 +294,7 @@ test("the inverter off-grid abnormal releases the boiler after thirty minutes", 
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [], "lit the boiler for a generator test run");
 
-  mod.state.vebusShortSince = Date.now() - (31 * MINUTES);
+  advanceClock(2 * MINUTES);
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true]);
 });
@@ -392,15 +404,15 @@ test("the wait survives a broker blip rather than starting over", () => {
   const { mod, calls } = loadRelease();
   settle(mod, false);
   vebusShortFor(mod, PASSTHRU, 29 * MINUTES);
-  const since = mod.state.vebusShortSince;
+  const since = mod.state.vebusShortSinceUptime;
 
   mod.resetMqttData();
   victron(mod, "vebusState", PASSTHRU); // the broker returns, saying the same thing
   dhwClock(mod, false);
   boiler(mod, false);
 
-  assert.strictEqual(mod.state.vebusShortSince, since);
-  mod.state.vebusShortSince = Date.now() - (31 * MINUTES);
+  assert.strictEqual(mod.state.vebusShortSinceUptime, since);
+  advanceClock(2 * MINUTES); // thirty-one in total, counted across the blip
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true]);
 });
@@ -411,7 +423,7 @@ test("the inverter recovering clears the wait", () => {
 
   victron(mod, "vebusState", INVERTING);
 
-  assert.strictEqual(mod.state.vebusShortSince, 0,
+  assert.strictEqual(mod.state.vebusShortSinceUptime, null,
     "the next generator run would inherit the last one's twenty-nine minutes");
 });
 
@@ -534,12 +546,12 @@ test("an exercise run is held for an hour after ignition, then dropped", () => {
   boiler(mod, true); // it lights
   assert.strictEqual(mod.state.lastIgnition, now, "the ignition was not observed");
 
-  clockAt(now + 59 * MINUTES);
+  clockRunsTo(mod, now, now + 59 * MINUTES);
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true],
     "dropped the release before the burn had done anything");
 
-  clockAt(now + 61 * MINUTES);
+  clockRunsTo(mod, now + 59 * MINUTES, now + 61 * MINUTES);
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true, false]);
 });
@@ -554,10 +566,10 @@ test("an exercise run that has finished does not start again", () => {
   mod.checkSystemState();
   boiler(mod, true);
 
-  clockAt(now + 2 * HOURS);
+  clockRunsTo(mod, now, now + 2 * HOURS);
   mod.checkSystemState();
   settle(mod, false);
-  clockAt(now + 3 * HOURS);
+  clockRunsTo(mod, now + 2 * HOURS, now + 3 * HOURS);
   mod.checkSystemState();
 
   assert.deepStrictEqual(switchCommands(calls), [false],
@@ -717,15 +729,15 @@ test("a release this script granted stands for an hour", () => {
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true]);
   mod.state.relayIsOn = true;
-  assert.ok(mod.state.releasedAt > 0,
+  assert.ok(mod.state.releasedAtUptime !== null,
     "the release did not write down when it was granted, so nothing holds it");
 
   dhwClock(mod, false); // the clock stops calling five minutes later
-  mod.state.releasedAt = Date.now() - (5 * MINUTES);
+  advanceClock(5 * MINUTES);
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true], "dropped a burn five minutes in");
 
-  mod.state.releasedAt = Date.now() - (61 * MINUTES);
+  advanceClock(56 * MINUTES);
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [true, false]);
 });
@@ -739,7 +751,7 @@ test("it says nothing about a relay this script merely found closed", () => {
 
   mod.checkSystemState();
 
-  assert.strictEqual(mod.state.releasedAt, 0);
+  assert.strictEqual(mod.state.releasedAtUptime, null);
   assert.deepStrictEqual(switchCommands(calls), [false]);
 });
 
@@ -808,7 +820,8 @@ test("the status line shows how long the inverter has been off-grid abnormal", (
 
   assert.ok(statusText(mod).indexOf("VE Passthru 0s") >= 0, statusText(mod));
 
-  mod.state.vebusShortSince = Date.now() - (31 * MINUTES);
+  advanceClock(31 * MINUTES);
+  mod.checkSystemState();
   assert.ok(statusText(mod).indexOf("VE Passthru 31m") >= 0, statusText(mod));
 });
 
@@ -1108,4 +1121,58 @@ test("a broker drop forgets the time clock and keeps the lock", () => {
   assert.strictEqual(mod.state.dhwDemandReceived, false);
   assert.strictEqual(mod.state.lockKnown, true);
   assert.strictEqual(mod.state.lockIsClosed, false);
+});
+
+// ===== The clock jumping =====
+//
+// Every interval within a run is measured against uptime so that an NTP sync cannot
+// reach it. See docs/adr/0003.
+
+test("NTP landing does not satisfy the thirty-minute wait", () => {
+  // The second route to the same hour-long burn, and the one nobody looked at: .164 stamps
+  // vebusShortSince on the first non-inverting reading, which after an outage arrives early
+  // in its own boot. On the wall clock the sync then makes that stamp twelve days old, and
+  // rung 3 releases with no wait at all.
+  const { mod, calls } = loadRelease();
+  settle(mod, false);
+  victron(mod, "vebusState", PASSTHRU);
+  dhwClock(mod, false);
+  boiler(mod, false);
+
+  withJumpedWallClock(function () { mod.checkSystemState(); });
+
+  assert.strictEqual(mod.shortageRelease(), "",
+    "twelve days of clock jump counted as thirty minutes of generator run");
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the boiler was lit seconds into a boot, on a wait that was never waited");
+});
+
+test("the thirty minutes still passes, on the clock that cannot jump", () => {
+  const { mod, calls } = loadRelease();
+  settle(mod, false);
+  vebusShortFor(mod, PASSTHRU, 31 * MINUTES);
+  dhwClock(mod, false);
+  boiler(mod, false);
+
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+});
+
+test("NTP landing does not retire a release this script has just granted", () => {
+  // minimumOnTime is deliberately absolute, so the clock must not be able to end it early
+  // either. The hour is measured from the grant, on uptime.
+  const { mod, calls } = loadRelease();
+  settle(mod, false);
+  heardEverything(mod);
+  dhwClock(mod, true);
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+  mod.state.relayIsOn = true;
+
+  dhwClock(mod, false);
+  withJumpedWallClock(function () { mod.checkSystemState(); });
+
+  assert.deepStrictEqual(switchCommands(calls), [true],
+    "an hour that had not passed was read off a clock that had jumped");
 });

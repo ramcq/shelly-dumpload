@@ -9,7 +9,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, captureLog } = require("./harness.js");
+const { load, captureLog, advanceClock, withJumpedWallClock } =
+  require("./harness.js");
 
 const SCRIPT = "surplus-dump-controller.js";
 const HEATER = 2690; // W, nominal per immersion
@@ -398,14 +399,15 @@ test("an SOC never heard from tracks surplus rather than suppressing", () => {
 // charging it nominal power reserves 2.69 kW that is not being used and holds the
 // stage below it off - which is the regression that put this ordering in.
 
-// Milliseconds ago, as a lastChangeTime.
-function changedAgo(ms) {
-  return Date.now() - ms;
+// Milliseconds ago, as a lastChangeUptime. Negative where the run is younger than the
+// interval asked for, which the arithmetic takes in its stride.
+function changedAgo(mod, ms) {
+  return mod.state.nowUptime - ms;
 }
 
 test("a stage never commanded is not locked", () => {
   const { mod } = loadController();
-  assert.strictEqual(mod.isLoadLocked(0), false,
+  assert.strictEqual(mod.isLoadLocked(null), false,
     "a fresh script has moved nothing, so nothing is waiting out a lock");
 });
 
@@ -413,14 +415,14 @@ test("the lock ends at ten minutes", () => {
   const { mod } = loadController();
   const window = mod.config.dumpLoad.minChangeTime;
 
-  assert.strictEqual(mod.isLoadLocked(changedAgo(window - 1000)), true);
-  assert.strictEqual(mod.isLoadLocked(changedAgo(window)), false);
+  assert.strictEqual(mod.isLoadLocked(changedAgo(mod, window - 1000)), true);
+  assert.strictEqual(mod.isLoadLocked(changedAgo(mod, window)), false);
 });
 
 test("a locked ON stage rides out a surplus that has fallen below it", () => {
   const { mod } = loadController();
   mod.state.remoteSwitches[0].on = true;
-  mod.state.remoteSwitches[0].lastChangeTime = changedAgo(60 * 1000);
+  mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
   // 200 W of surplus against a 2.69 kW stage: unlocked it would go off, and back on
   // as soon as a cloud passed. This is the flutter the lock exists to stop.
@@ -430,7 +432,7 @@ test("a locked ON stage rides out a surplus that has fallen below it", () => {
 test("a locked OFF stage stays off however much surplus arrives", () => {
   const { mod } = loadController();
   mod.state.remoteSwitches[1].on = false;
-  mod.state.remoteSwitches[1].lastChangeTime = changedAgo(60 * 1000);
+  mod.state.remoteSwitches[1].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
   assert.deepStrictEqual(mod.calculateDesiredState(3 * HEATER).switches,
     [true, false, true]);
@@ -439,7 +441,7 @@ test("a locked OFF stage stays off however much surplus arrives", () => {
 test("a surplus below the floor sheds a locked stage anyway", () => {
   const { mod } = loadController();
   mod.state.remoteSwitches[0].on = true;
-  mod.state.remoteSwitches[0].lastChangeTime = changedAgo(60 * 1000);
+  mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
   // The minSurplus floor returns before the lock is consulted, so the lock holds a
   // stage against a thin surplus but not against no surplus. That is the right way
@@ -454,7 +456,7 @@ test("a surplus below the floor sheds a locked stage anyway", () => {
 test("a locked ON stage consumes its nominal power, so the next stage is not given it twice", () => {
   const { mod } = loadController();
   mod.state.remoteSwitches[0].on = true;
-  mod.state.remoteSwitches[0].lastChangeTime = changedAgo(60 * 1000);
+  mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
   const desired = mod.calculateDesiredState(2 * HEATER);
 
@@ -466,7 +468,7 @@ test("a locked ON stage consumes its nominal power, so the next stage is not giv
 test("a locked OFF stage skips its allocation, so the next stage gets the power", () => {
   const { mod } = loadController();
   mod.state.remoteSwitches[0].on = false;
-  mod.state.remoteSwitches[0].lastChangeTime = changedAgo(60 * 1000);
+  mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
   assert.deepStrictEqual(mod.calculateDesiredState(HEATER + 50).switches,
     [false, true, false],
@@ -494,7 +496,7 @@ test("stalled outranks locked, rather than the lock reserving power for a cut-ou
   stage.on = true;
   stage.voltage = 230;
   stage.power = 0;
-  stage.lastChangeTime = changedAgo(60 * 1000);  // locked as well as stalled
+  stage.lastChangeUptime = changedAgo(mod, 60 * 1000);  // locked as well as stalled
 
   assert.deepStrictEqual(mod.calculateDesiredState(2 * HEATER).switches,
     [true, true, true],
@@ -507,7 +509,7 @@ test("a stage that has just changed is not read as stalled", () => {
   stage.on = true;
   stage.voltage = 230;
   stage.power = 0;                          // the meter has not caught up yet
-  stage.lastChangeTime = changedAgo(10 * 1000);
+  stage.lastChangeUptime = changedAgo(mod, 10 * 1000);
 
   // Measurement lags the command, so a stage switched on ten seconds ago looks
   // exactly like one at cutout. Treating it as stalled would give its power away
@@ -647,7 +649,7 @@ test("a silent stage does not gate the others forever", () => {
   mod.checkSystemState();
   assert.strictEqual(mod.state.initialized, false, "should still be waiting");
 
-  mod.state.firstIncompleteCheck = Date.now() - mod.config.statusSeedTimeout - 1000;
+  advanceClock(mod.config.statusSeedTimeout + 1000);
   mod.checkSystemState();
 
   assert.strictEqual(mod.state.initialized, true,
@@ -723,11 +725,11 @@ test("a restart that finds nothing running seeds nothing", () => {
 
 test("a broker reconnect re-arms the bounded wait", () => {
   const { mod } = loadController();
-  mod.state.firstIncompleteCheck = 12345;
+  mod.state.firstIncompleteCheckUptime = 12345;
 
   mod.resetMqttData();
 
-  assert.strictEqual(mod.state.firstIncompleteCheck, 0);
+  assert.strictEqual(mod.state.firstIncompleteCheckUptime, null);
   mod.state.remoteSwitches.forEach((s) => {
     assert.strictEqual(s.statusReceived, false);
   });
@@ -956,4 +958,41 @@ test("the status line tells an unheard VE.Bus state from Off", () => {
 
   victron(mod, "vebusState", INVERTING);
   assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("VE:Inverting") >= 0);
+});
+
+// ===== The clock jumping =====
+//
+// Every interval within the run is measured against uptime. See docs/adr/0003.
+
+test("a stage this run never commanded is judged on what it reports", () => {
+  // Under the wall clock `Date.now() - 0` was enormous, so a never-commanded stage skipped
+  // the settling grace and was read as stalled straight away - which is what the call site
+  // wanted. Uptime inverts a zero stamp into "just now", so the sentinel is null and
+  // isLoadStalled tests for it. isLoadLocked below it always did.
+  const { mod } = loadController();
+  const stage = mod.state.remoteSwitches[0];
+  stage.on = true;
+  stage.voltage = 240;
+  stage.power = 0;
+
+  assert.strictEqual(stage.lastChangeUptime, null);
+  assert.strictEqual(mod.isLoadStalled(stage, stage.lastChangeUptime), true,
+    "a thermal cutout went unnoticed for the first thirty seconds of every run");
+});
+
+test("NTP landing does not end a stage's settling grace", () => {
+  // Through refreshUptime, which is what a pass does before judging: isLoadStalled consults
+  // no clock of its own, so asserting on it alone would pass with or without the bug.
+  const { mod } = loadController();
+  const stage = mod.state.remoteSwitches[0];
+  stage.on = true;
+  stage.voltage = 240;
+  stage.power = 0;
+  stage.lastChangeUptime = mod.state.nowUptime;
+
+  withJumpedWallClock(function () {
+    mod.refreshUptime();
+    assert.strictEqual(mod.isLoadStalled(stage, stage.lastChangeUptime), false,
+      "a stage commanded a moment ago was read as stalled, forcing it on");
+  });
 });

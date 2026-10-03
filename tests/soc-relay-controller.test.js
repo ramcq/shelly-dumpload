@@ -10,7 +10,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, captureLog } = require("./harness.js");
+const { load, captureLog, advanceClock, withJumpedWallClock } = require("./harness.js");
 
 const DUMP = "soc-relay-controller.js";
 
@@ -1118,7 +1118,7 @@ test("a fresh start does not lock the heat pump before its first VE.Bus reading"
 test("a broker that never answers locks the heat pump once the grace expires", () => {
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
-  mod.state.startedAt = Date.now() - (mod.config.startupGrace + 1000);
+  advanceClock(mod.config.startupGrace + 1000);
 
   mod.checkSystemState();
   assert.deepStrictEqual(switchCommands(calls), [false],
@@ -1312,4 +1312,51 @@ test("a reconnect asks the lead again", () => {
 
   assert.strictEqual(statusUpdates(published, mod).length, 1,
     "a follower that kept its answer would ignore a switch that moved while it was down");
+});
+
+// ===== The clock jumping =====
+//
+// Every interval within a run is measured against uptime so that an NTP sync cannot
+// reach it. See docs/adr/0003.
+
+test("NTP landing does not expire the startup grace", () => {
+  // The whole incident in one test: .209 boots, has heard nothing from the Cerbo yet, and
+  // the wall clock jumps twelve days. A grace measured on Date.now() ends instantly,
+  // inShortage() answers true rather than null, and the lock opens on a battery nobody has
+  // read.
+  const { mod, calls } = loadShortageLead();
+  settle(mod, true);
+
+  withJumpedWallClock(function () { mod.checkSystemState(); });
+
+  assert.strictEqual(mod.inShortage(), null,
+    "a grace measured on the wall clock ended the moment NTP landed");
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "the heat pump was locked 34 seconds into a boot, for a reading still in flight");
+});
+
+test("the grace still ends, on the clock that cannot jump", () => {
+  // The other half: uptime must not freeze the grace open either.
+  const { mod, calls } = loadShortageLead();
+  settle(mod, true);
+
+  advanceClock(mod.config.startupGrace + 1000);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [false],
+    "silence past the grace is the trouble the VE.Bus gate exists for");
+});
+
+test("a device that cannot read its own uptime lets no interval elapse", () => {
+  // An unreadable `sys` leaves state.nowUptime standing rather than advancing, so an
+  // interval that cannot be measured has not elapsed - and nothing acts on it.
+  const { mod, calls } = loadShortageLead();
+  settle(mod, true);
+  global.Shelly.getComponentStatus = function () { return null; };
+
+  advanceClock(mod.config.startupGrace + 1000);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "an unreadable clock was treated as a clock that had run on");
 });

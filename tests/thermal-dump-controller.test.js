@@ -7,7 +7,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, captureLog } = require("./harness.js");
+const { load, captureLog, withJumpedWallClock } = require("./harness.js");
 
 const THERMAL = "thermal-dump-controller.js";
 const SURPLUS = "surplus-dump-controller.js";
@@ -469,7 +469,7 @@ test("an output that has just started is not stopped inside five minutes", () =>
   const output = mod.getOutput(0);
   output.on = true;
   output.intended = true;
-  output.onTime = Date.now() - 60 * 1000;
+  output.onTimeUptime = mod.state.nowUptime - 60 * 1000;
 
   mod.turnOutputOff(0, "test");
 
@@ -483,7 +483,7 @@ test("past five minutes it stops", () => {
   const output = mod.getOutput(0);
   output.on = true;
   output.intended = true;
-  output.onTime = Date.now() - mod.config.minRunTime - 1000;
+  output.onTimeUptime = mod.state.nowUptime - mod.config.minRunTime - 1000;
 
   mod.turnOutputOff(0, "test");
 
@@ -494,9 +494,47 @@ test("past five minutes it stops", () => {
 
 test("nothing delays a start", () => {
   const { mod, calls } = loadThermal();
-  mod.getOutput(0).onTime = Date.now();
+  mod.getOutput(0).onTimeUptime = mod.state.nowUptime;
 
   mod.turnOutputOn(0, "test");
 
   assert.deepStrictEqual(switchCommands(calls), [{ id: 0, on: true }]);
+});
+
+// ===== The clock jumping =====
+//
+// The minimum run time is an interval within the run, so it is measured against uptime and
+// a wall clock that jumps cannot end it early. See docs/adr/0003.
+
+test("NTP landing does not retire the minimum run time", () => {
+  // Through the control pass, which is what takes the reading: calling turnOutputOff directly
+  // would never consult a clock at all, and would pass whether or not the bug were present.
+  const { mod, calls } = loadThermal();
+  const output = mod.getOutput(0);
+  output.on = true;
+  output.intended = true;
+  output.onTimeUptime = mod.state.nowUptime;
+
+  withJumpedWallClock(function () {
+    mod.refreshUptime();
+    mod.turnOutputOff(0, "test");
+  });
+
+  assert.deepStrictEqual(switchCommands(calls), [],
+    "a fan coil just started was stopped on a clock that had jumped");
+});
+
+test("an output this run never started waits out nothing", () => {
+  // Under the wall clock a zero stamp read as long elapsed, which is what the call site
+  // wanted. Uptime inverts that, so the sentinel is null and is tested for.
+  const { mod, calls } = loadThermal();
+  const output = mod.getOutput(0);
+  output.on = true;
+  output.intended = true;
+
+  mod.turnOutputOff(0, "test");
+
+  assert.strictEqual(output.onTimeUptime, null);
+  assert.deepStrictEqual(switchCommands(calls), [{ id: 0, on: false }],
+    "an output found running was held for five minutes it had never been asked to wait");
 });

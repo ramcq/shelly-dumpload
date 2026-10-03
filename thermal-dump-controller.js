@@ -102,14 +102,14 @@ let state = {
       name: "Fan Coil",
       on: false,           // Actual state
       intended: false,     // Intended state (for re-entrancy prevention)
-      onTime: 0            // Timestamp when turned on
+      onTimeUptime: null   // Uptime when turned on, or null while off
     },
     {
       id: OUTPUT_PUMP,
       name: "Pump",
       on: false,
       intended: false,
-      onTime: 0
+      onTimeUptime: null
     }
   ],
 
@@ -124,6 +124,11 @@ let state = {
   bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
   bridgeConnectedReceived: false,  // is no claim either way
 
+  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
+  // below the state literal.
+  nowUptime: null,           // Uptime at the start of this pass, or null
+                             // while the clock has never been read
+
   // Timer
   timerId: null
 };
@@ -133,6 +138,30 @@ let state = {
 for (let i = 0; i < config.dumpLoads.length; i++) {
   state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
 }
+
+// ===== Elapsed time =====
+//
+// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
+// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
+// entry points the device calls; an unreadable `sys` leaves the last value standing.
+function refreshUptime() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || sys.uptime === undefined) {
+    return;
+  }
+
+  state.nowUptime = sys.uptime * 1000;
+
+  // The anchor is stamped by the first reading there is, not by the first attempt. A script
+  // whose opening read failed would otherwise date itself to zero and find, on the next
+  // reading, that a device up five days had run out its grace before it subscribed.
+  if (state.startedAtUptime === null) {
+    state.startedAtUptime = state.nowUptime;
+  }
+}
+
+refreshUptime();
 
 // Helper to get output object by ID
 function getOutput(outputId) {
@@ -316,6 +345,9 @@ function setupEventHandlers() {
     if (!event || !event.name || !event.info || !event.info.event)
       return;
 
+    // An output moving stamps its start, so the handler takes its own reading.
+    refreshUptime();
+
     if (event.info.event == "power_measurement" ||
         event.info.event == "power_update" ||
         event.info.event == "current_update" ||
@@ -374,7 +406,7 @@ function setupEventHandlers() {
         if (output.on !== newState) {
           output.on = newState;
           if (newState) {
-            output.onTime = Date.now();
+            output.onTimeUptime = state.nowUptime;
           }
           logDebug(output.name + " state updated to: " + output.on + " (expected)");
           updateStatus(output.name + " changed");
@@ -385,7 +417,7 @@ function setupEventHandlers() {
         if (output.on !== newState) {
           output.on = newState;
           if (newState) {
-            output.onTime = Date.now();
+            output.onTimeUptime = state.nowUptime;
           }
         }
         output.intended = newState; // Sync intended to actual
@@ -406,6 +438,9 @@ function processMqttMessage(topic, message) {
     logDebug("Empty message for topic: " + topic);
     return;
   }
+
+  // A stalled peer starts the pump from here, so a message takes its own reading.
+  refreshUptime();
 
   try {
     let payload = JSON.parse(message);
@@ -702,7 +737,7 @@ function turnOutputOn(outputId, reason) {
 
       // Update actual state (defensive, in case event doesn't fire)
       output.on = true;
-      output.onTime = Date.now();
+      output.onTimeUptime = state.nowUptime;
       updateStatus(reason);
     }
   );
@@ -711,13 +746,16 @@ function turnOutputOn(outputId, reason) {
 function turnOutputOff(outputId, reason) {
   let output = getOutput(outputId);
 
-  // Check minimum run time
-  let currentTime = Date.now();
-  let timeElapsed = currentTime - output.onTime;
-  if (timeElapsed < config.minRunTime) {
-    logDebug("Not turning " + output.name + " off - minimum run time not elapsed (" +
-            (timeElapsed / 1000).toFixed(0) + "s / " + (config.minRunTime / 1000) + "s)");
-    return;
+  // Check minimum run time. An output this run never started has none to wait out - what
+  // it was doing before the script started is not this run's decision to undo.
+  if (output.onTimeUptime !== null) {
+    let timeElapsed = state.nowUptime - output.onTimeUptime;
+
+    if (timeElapsed < config.minRunTime) {
+      logDebug("Not turning " + output.name + " off - minimum run time not elapsed (" +
+              (timeElapsed / 1000).toFixed(0) + "s / " + (config.minRunTime / 1000) + "s)");
+      return;
+    }
   }
 
   logDebug("Attempting to turn " + output.name + " OFF: " + reason);
@@ -742,6 +780,10 @@ function turnOutputOff(outputId, reason) {
 }
 
 function checkSystemState() {
+  // Every entry into the control logic takes its own reading of the clock, because the
+  // MQTT and event handlers reach this directly as well as the poll does.
+  refreshUptime();
+
   updateStatus("Monitoring");
 
   let fanCoil = getOutput(OUTPUT_FAN_COIL);

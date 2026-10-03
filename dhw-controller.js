@@ -68,9 +68,10 @@ let config = {
   // main loop, so a republish asked for in the same breath is answered before anything is
   // listening. The length hardly matters - a millisecond would do.
   initialKeepaliveDelay: 1000,
-  startupGrace: 3 * 60 * 1000,  // ms - how long a relay found closed waits for the readings
-                                // that might justify it before silence is taken at face
-                                // value. Covers a Cerbo boot
+  startupGrace: 5 * 60 * 1000,  // ms - how long a relay found closed waits for the readings
+                                // that might justify it before silence is taken at
+                                // face value. Five minutes, for the reason in
+                                // CONTROLS.md
   checkInterval: 30 * 1000, // 30 seconds in milliseconds
 
   // Debug mode
@@ -84,10 +85,15 @@ let state = {
   keepaliveTimer: null,
   reconnectTimer: null,
 
-  // Device identity
-  startedAt: Date.now(),
-  listeningSince: Date.now(),  // Script start, and every reconnect after it: a drop empties
+  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
+  // below the state literal.
+  nowUptime: null,           // Uptime at the start of this pass, or null
+                             // while the clock has never been read
+  startedAtUptime: null,     // Uptime when this script started, for the startup grace
+  listeningSinceUptime: null,  // Script start, and every reconnect after it: a drop empties
                                // the readings as thoroughly as a restart does
+
+  // Device identity
   identityKnown: false,      // Whether this is the device the file is written for
   deviceName: "",
 
@@ -113,11 +119,56 @@ let state = {
   windowBlind: false,        // Whether it latched with no buffer reading behind it
   windowLatched: false,      // The enable has closed within this window, so it stays closed
                              // until the window ends
-  entryWindowUntil: 0,       // ms, Date.now() - an interval within this run, not a time
+  entryWindowUntilUptime: null,  // Uptime at which the entry window closes - an interval
+                             // within this run, not a time, so a reboot ends it
 
   // Timer
   timerId: null
 };
+
+// ===== Elapsed time =====
+//
+// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
+// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
+// entry points the device calls; an unreadable `sys` leaves the last value standing.
+function refreshUptime() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || sys.uptime === undefined) {
+    return;
+  }
+
+  state.nowUptime = sys.uptime * 1000;
+
+  // The anchor is stamped by the first reading there is, not by the first attempt. A script
+  // whose opening read failed would otherwise date itself to zero and find, on the next
+  // reading, that a device up five days had run out its grace before it subscribed.
+  if (state.startedAtUptime === null) {
+    state.startedAtUptime = state.nowUptime;
+  }
+}
+
+// Read here rather than in init(), so the grace covers this script's own startup as well
+// as the wait for the Cerbo.
+refreshUptime();
+state.listeningSinceUptime = state.startedAtUptime;
+
+// Whether `sinceUptime` is still inside the startup grace. An interval that cannot be
+// measured has not elapsed, so a clock never read keeps everything waiting rather than
+// declaring a grace it never timed to be over.
+function withinGrace(sinceUptime) {
+  if (state.nowUptime === null || sinceUptime === null) {
+    return true;
+  }
+
+  return state.nowUptime - sinceUptime < config.startupGrace;
+}
+
+// This run is still new enough that a reading it has never had is only one that has not
+// arrived yet.
+function withinStartupGrace() {
+  return withinGrace(state.startedAtUptime);
+}
 
 // ===== Virtual component handles =====
 let handles = {
@@ -214,7 +265,7 @@ function bufferUnreadable() {
     return false;
   }
 
-  return Date.now() - state.listeningSince >= config.startupGrace;
+  return !withinGrace(state.listeningSinceUptime);
 }
 
 // Which window this moment falls in, or "" for none. A scheduled slot outranks the entry
@@ -230,7 +281,8 @@ function currentWindowKey() {
     return hour + ":00";
   }
 
-  if (state.entryWindowUntil && Date.now() < state.entryWindowUntil) {
+  if (state.entryWindowUntilUptime !== null &&
+      state.nowUptime < state.entryWindowUntilUptime) {
     return "entry";
   }
 
@@ -468,6 +520,10 @@ function processMqttMessage(topic, message) {
     return;
   }
 
+  // The lock's opening edge stamps the entry window, so a message takes its own reading of
+  // the clock rather than using whatever the last poll left behind.
+  refreshUptime();
+
   try {
     // The lock. Its opening edge is also the entry window.
     if (topic === config.heatPumpLock.statusTopic) {
@@ -485,7 +541,7 @@ function processMqttMessage(topic, message) {
           // An edge only - .209 republishes its whole status on every reconnect. A restart
           // mid-shortage reads as one, costing at most an extra guarded hour.
           if (!state.lockIsClosed) {
-            state.entryWindowUntil = Date.now() + config.window.entryWindowLength;
+            state.entryWindowUntilUptime = state.nowUptime + config.window.entryWindowLength;
             console.log("Opening a DHW window for the next hour");
           }
 
@@ -544,7 +600,8 @@ function handleMqttConnected() {
   state.mqttConnected = true;
 
   // Where the wait for a reading fairly begins, on a reconnect as much as the first one.
-  state.listeningSince = Date.now();
+  refreshUptime();
+  state.listeningSinceUptime = state.nowUptime;
 
   let topicPrefix = "N/" + config.cerbo.portalId + "/";
   for (let key in config.topics) {
@@ -805,6 +862,10 @@ function outstandingReadings() {
 }
 
 function checkSystemState() {
+  // Every entry into the control logic takes its own reading of the clock, because the MQTT
+  // handlers reach this directly as well as the poll does.
+  refreshUptime();
+
   updateWindow();
   updateWindowGuard();
   updateStatus("Monitoring");
@@ -834,7 +895,7 @@ function checkSystemState() {
   // rather than shutting the zone valves on a live window. Past the grace, silence counts.
   let outstanding = outstandingReadings();
 
-  if (outstanding !== "" && Date.now() - state.startedAt < config.startupGrace) {
+  if (outstanding !== "" && withinStartupGrace()) {
     logDebug("Enabled, and still waiting on " + outstanding + " - leaving the relay alone");
     return;
   }

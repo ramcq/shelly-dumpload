@@ -115,9 +115,10 @@ let config = {
   // main loop, so a republish asked for in the same breath is answered before anything is
   // listening. The length hardly matters - a millisecond would do.
   initialKeepaliveDelay: 1000,
-  startupGrace: 3 * 60 * 1000,  // ms - how long a relay found closed waits for the readings
-                                // that might justify it before silence is taken at face
-                                // value. Covers a Cerbo boot
+  startupGrace: 5 * 60 * 1000,  // ms - how long a relay found closed waits for the readings
+                                // that might justify it before silence is taken at
+                                // face value. Five minutes, for the reason in
+                                // CONTROLS.md
   checkInterval: 30 * 1000, // 30 seconds in milliseconds
 
   // Debug mode
@@ -131,8 +132,13 @@ let state = {
   keepaliveTimer: null,
   reconnectTimer: null,
 
+  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
+  // below the state literal.
+  nowUptime: null,           // Uptime at the start of this pass, or null
+                             // while the clock has never been read
+  startedAtUptime: null,     // Uptime when this script started, for the startup grace
+
   // Device identity
-  startedAt: Date.now(),
   identityKnown: false,      // Whether this is the device the file is written for
   deviceName: "",
 
@@ -159,9 +165,10 @@ let state = {
                              // controller that has just started
   vebusStale: false,         // Set by a broker drop. The last reading is kept and shown as
                              // what it is, rather than zeroed into an invented "Off"
-  vebusShortSince: 0,        // When the run of non-inverting readings began. Not cleared by
-                             // a broker drop: the readings either side of a blip both say
-                             // the inverter is off-grid abnormal
+  vebusShortSinceUptime: null,  // Uptime when the run of non-inverting readings began, or
+                             // null for no such run. Not cleared by a broker drop: the
+                             // readings either side of a blip both say the inverter is
+                             // off-grid abnormal
   boilerOperating: false,
   boilerReceived: false,     // Whether that was published rather than assumed
   bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
@@ -170,14 +177,59 @@ let state = {
   // The exercise run
   lastIgnition: null,        // ms, from KVS. Null while unread, which makes the term inert
   ignitionReadPending: false,
-  exerciseHoldUntil: 0,      // ms - while set, an exercise burn is under way
+  exerciseHoldUntilUptime: null,  // Uptime at which an exercise burn's hold ends, or null
+                             // for no burn under way. The hold is an interval within this
+                             // run; the fourteen days behind it is not, and keeps wall time
 
-  releasedAt: 0,             // When this script last commanded the relay on, for the minimum
-                             // on time. Zero for a relay it merely found closed
+  releasedAtUptime: null,    // Uptime when this script last commanded the relay on, for the
+                             // minimum on time. Null for a relay it merely found closed
 
   // Timer
   timerId: null
 };
+
+// ===== Elapsed time =====
+//
+// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
+// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
+// entry points the device calls; an unreadable `sys` leaves the last value standing.
+function refreshUptime() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || sys.uptime === undefined) {
+    return;
+  }
+
+  state.nowUptime = sys.uptime * 1000;
+
+  // The anchor is stamped by the first reading there is, not by the first attempt. A script
+  // whose opening read failed would otherwise date itself to zero and find, on the next
+  // reading, that a device up five days had run out its grace before it subscribed.
+  if (state.startedAtUptime === null) {
+    state.startedAtUptime = state.nowUptime;
+  }
+}
+
+// Read here rather than in init(), so the grace covers this script's own startup as well
+// as the wait for the Cerbo.
+refreshUptime();
+
+// Whether `sinceUptime` is still inside the startup grace. An interval that cannot be
+// measured has not elapsed, so a clock never read keeps everything waiting rather than
+// declaring a grace it never timed to be over.
+function withinGrace(sinceUptime) {
+  if (state.nowUptime === null || sinceUptime === null) {
+    return true;
+  }
+
+  return state.nowUptime - sinceUptime < config.startupGrace;
+}
+
+// This run is still new enough that a reading it has never had is only one that has not
+// arrived yet.
+function withinStartupGrace() {
+  return withinGrace(state.startedAtUptime);
+}
 
 // ===== Virtual component handles =====
 let handles = {
@@ -223,8 +275,8 @@ function describeDuration(ms) {
 // term here that spans a reboot, so it is the only one that needs a clock the device did
 // not invent: fourteen days is not an interval a script can time, and a timestamp written
 // before NTP landed reads as decades once it arrives - which would light the boiler on the
-// first poll after a redeploy. Every other term times an interval within one run, where
-// Date.now() is right whether or not it agrees with the world.
+// first poll after a redeploy. Every other term times an interval within one run, and those
+// are measured against uptime rather than Date.now(): see refreshUptime() and ADR 0003.
 function syncedNow() {
   let sys = Shelly.getComponentStatus("sys");
 
@@ -302,13 +354,13 @@ function shortageRelease() {
       return "shortage: VE.Bus " + getVebusStateString(state.vebusState);
     }
 
-    if (!state.vebusShortSince ||
-        Date.now() - state.vebusShortSince < config.release.sustainedAfter) {
+    if (state.vebusShortSinceUptime === null ||
+        state.nowUptime - state.vebusShortSinceUptime < config.release.sustainedAfter) {
       return "";
     }
 
     return "shortage: VE.Bus " + getVebusStateString(state.vebusState) + " for " +
-           describeDuration(Date.now() - state.vebusShortSince);
+           describeDuration(state.nowUptime - state.vebusShortSinceUptime);
   }
 
   // Inverting off-grid with the lock open leaves one cause: the battery. Nothing else opens
@@ -324,17 +376,15 @@ function shortageRelease() {
 // Drop the hold once the hour is up, which returns the term to the fourteen-day comparison
 // - by then false, because the ignition that started the burn was written down.
 function updateExerciseRun() {
-  if (!state.exerciseHoldUntil) {
+  if (state.exerciseHoldUntilUptime === null) {
     return;
   }
 
-  let now = syncedNow();
-
-  if (now === null || now < state.exerciseHoldUntil) {
+  if (state.nowUptime < state.exerciseHoldUntilUptime) {
     return;
   }
 
-  state.exerciseHoldUntil = 0;
+  state.exerciseHoldUntilUptime = null;
   console.log("Exercise run complete - dropping the release");
 }
 
@@ -353,7 +403,7 @@ function exerciseDue() {
     return false;
   }
 
-  if (state.exerciseHoldUntil) {
+  if (state.exerciseHoldUntilUptime !== null) {
     return true;
   }
 
@@ -460,8 +510,8 @@ function recordIgnition() {
     return;
   }
 
-  if (!state.exerciseHoldUntil && exerciseDue()) {
-    state.exerciseHoldUntil = now + config.release.exerciseHold;
+  if (state.exerciseHoldUntilUptime === null && exerciseDue()) {
+    state.exerciseHoldUntilUptime = state.nowUptime + config.release.exerciseHold;
     console.log("Exercise run alight - holding the release for " +
                describeDuration(config.release.exerciseHold));
   }
@@ -488,8 +538,8 @@ function updateStatus(event) {
     : (state.lockIsClosed ? "Enabled" : "Locked"));
 
   // The one duration that decides anything now, so the one worth showing.
-  let vebusShortPart = state.vebusShortSince
-    ? " " + describeDuration(Date.now() - state.vebusShortSince)
+  let vebusShortPart = state.vebusShortSinceUptime !== null
+    ? " " + describeDuration(state.nowUptime - state.vebusShortSinceUptime)
     : "";
   let vebusPart = ", VE " + (!state.vebusReceived
     ? "?"
@@ -653,6 +703,10 @@ function processMqttMessage(topic, message) {
     return;
   }
 
+  // A message can start the run of non-inverting readings, so it takes its own reading of
+  // the clock rather than using whatever the last poll left behind.
+  refreshUptime();
+
   try {
     // The heat pump lock, which is the whole of what this controller knows about the power
     // system apart from the VE.Bus state it uses to tell the two shortage terms apart.
@@ -713,11 +767,11 @@ function processMqttMessage(topic, message) {
       // waits. A broker drop does not disturb it: the readings either side of a blip both
       // say the inverter is off-grid abnormal, and the relay carries the answer meanwhile.
       if (state.vebusState !== 9) {
-        if (!state.vebusShortSince) {
-          state.vebusShortSince = Date.now();
+        if (state.vebusShortSinceUptime === null) {
+          state.vebusShortSinceUptime = state.nowUptime;
         }
       } else {
-        state.vebusShortSince = 0;
+        state.vebusShortSinceUptime = null;
       }
 
       if (prevState !== state.vebusState) {
@@ -999,7 +1053,7 @@ function turnRelayOn(reason) {
   logDebug("Attempting to release the boiler: " + reason);
 
   state.intendedRelayOn = true;
-  state.releasedAt = Date.now();
+  state.releasedAtUptime = state.nowUptime;
 
   Shelly.call(
     "Switch.Set",
@@ -1062,6 +1116,10 @@ function outstandingReadings() {
 }
 
 function checkSystemState() {
+  // Every entry into the control logic takes its own reading of the clock, because the MQTT
+  // handlers reach this directly as well as the poll does.
+  refreshUptime();
+
   updateStatus("Monitoring");
 
   // Commanding this relay before the device is known would burn someone else's wood.
@@ -1090,10 +1148,11 @@ function checkSystemState() {
 
   // A release this script granted stands for an hour whatever changes underneath it. Not a
   // relay it merely found closed: that one belongs to whatever closed it.
-  if (state.releasedAt &&
-      Date.now() - state.releasedAt < config.release.minimumOnTime) {
+  if (state.releasedAtUptime !== null &&
+      state.nowUptime - state.releasedAtUptime < config.release.minimumOnTime) {
     logDebug("Nothing is asking for the boiler, but it was released " +
-            describeDuration(Date.now() - state.releasedAt) + " ago - leaving it alone");
+            describeDuration(state.nowUptime - state.releasedAtUptime) +
+            " ago - leaving it alone");
     return;
   }
 
@@ -1103,7 +1162,7 @@ function checkSystemState() {
   // every redeploy. Past the grace, silence is taken at face value.
   let outstanding = outstandingReadings();
 
-  if (outstanding !== "" && Date.now() - state.startedAt < config.startupGrace) {
+  if (outstanding !== "" && withinStartupGrace()) {
     logDebug("Released, and still waiting on " + outstanding + " - leaving the relay alone");
     return;
   }

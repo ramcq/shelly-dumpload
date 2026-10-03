@@ -134,8 +134,14 @@ let state = {
   // Remote switch states, built below from config.remoteSwitches.switches
   remoteSwitches: [],
 
-  // When the first control pass ran without every stage having reported
-  firstIncompleteCheck: 0,
+  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
+  // below the state literal.
+  nowUptime: null,           // Uptime at the start of this pass, or null
+                             // while the clock has never been read
+
+  // Uptime when the first control pass ran without every stage having reported, or null for
+  // no such pass
+  firstIncompleteCheckUptime: null,
 
   // Local dimmer state
   localDimmer: {
@@ -143,7 +149,7 @@ let state = {
     brightness: 0,
     power: 0,
     voltage: 0,
-    lastChangeTime: 0
+    lastChangeUptime: null
   },
 
   // Control state
@@ -161,9 +167,33 @@ for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
     voltage: 0,
     power: 0,
     statusReceived: false,
-    lastChangeTime: 0
+    lastChangeUptime: null
   });
 }
+
+// ===== Elapsed time =====
+//
+// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
+// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
+// entry points the device calls; an unreadable `sys` leaves the last value standing.
+function refreshUptime() {
+  let sys = Shelly.getComponentStatus("sys");
+
+  if (!sys || sys.uptime === undefined) {
+    return;
+  }
+
+  state.nowUptime = sys.uptime * 1000;
+
+  // The anchor is stamped by the first reading there is, not by the first attempt. A script
+  // whose opening read failed would otherwise date itself to zero and find, on the next
+  // reading, that a device up five days had run out its grace before it subscribed.
+  if (state.startedAtUptime === null) {
+    state.startedAtUptime = state.nowUptime;
+  }
+}
+
+refreshUptime();
 
 // ===== Virtual component handles =====
 let handles = {
@@ -375,6 +405,10 @@ function processMqttMessage(topic, message) {
     logDebug("Empty message for topic: " + topic);
     return;
   }
+
+  // The overload fast path commands stages from here, stamping their change times, so
+  // a message takes its own reading rather than the last poll's.
+  refreshUptime();
 
   try {
     let payload = JSON.parse(message);
@@ -633,7 +667,7 @@ function resetMqttData() {
   }
 
   // Re-arm the bounded wait, so a reconnect cannot leave us gated on a silent stage
-  state.firstIncompleteCheck = 0;
+  state.firstIncompleteCheckUptime = null;
 
   logDebug("Reset MQTT data due to disconnection");
 }
@@ -804,29 +838,32 @@ function isEvChargingInAuto() {
   return state.evChargerMode === 1 && state.evChargerStatus === 2;
 }
 
-function isLoadStalled(load, lastChangeTime) {
+function isLoadStalled(load, lastChangeUptime) {
   // Detect thermal cutout: output ON, voltage present, but negligible power
   const minVoltage = 200;   // V - power is present
   const maxStallPower = 50; // W - allow small margin above 0
   const gracePeriod = 30000; // ms - don't check stalls on recently changed loads
 
   // Grace period: measurements lag behind commands, so newly-changed loads
-  // appear stalled before power readings arrive. Wait for stable state.
-  if (Date.now() - lastChangeTime < gracePeriod) {
+  // appear stalled before power readings arrive. Wait for stable state. A load this run has
+  // never commanded has no such lag to wait out - what it reports is what it was doing
+  // before the script started.
+  if (lastChangeUptime !== null &&
+      state.nowUptime - lastChangeUptime < gracePeriod) {
     return false;
   }
 
   return load.on && load.voltage >= minVoltage && load.power <= maxStallPower;
 }
 
-function isLoadLocked(lastChangeTime) {
+function isLoadLocked(lastChangeUptime) {
   // Check if load is within minimum change time window
   // Prevents rapid on/off cycling that causes relay wear and measurement instability
-  if (lastChangeTime === 0) {
+  if (lastChangeUptime === null) {
     return false;  // Never changed, not locked
   }
 
-  let timeSinceChange = Date.now() - lastChangeTime;
+  let timeSinceChange = state.nowUptime - lastChangeUptime;
   return timeSinceChange < config.dumpLoad.minChangeTime;
 }
 
@@ -955,8 +992,8 @@ function calculateDesiredState(available) {
   // - Locked: can't change state, use nominal power if ON
   // - Normal: allocate based on available power
   for (let i = 0; i < state.remoteSwitches.length; i++) {
-    let stalled = isLoadStalled(state.remoteSwitches[i], state.remoteSwitches[i].lastChangeTime);
-    let locked = isLoadLocked(state.remoteSwitches[i].lastChangeTime);
+    let stalled = isLoadStalled(state.remoteSwitches[i], state.remoteSwitches[i].lastChangeUptime);
+    let locked = isLoadLocked(state.remoteSwitches[i].lastChangeUptime);
 
     if (stalled) {
       // Stalled takes priority - load is ON but not consuming power
@@ -991,7 +1028,7 @@ function calculateDesiredState(available) {
   if (dimmerPercent >= config.dumpLoad.minChangePercent) {
     desired.dimmerOn = true;
     desired.dimmerBrightness = Math.floor(dimmerPercent);
-    if (!isLoadStalled(state.localDimmer, state.localDimmer.lastChangeTime)) {
+    if (!isLoadStalled(state.localDimmer, state.localDimmer.lastChangeUptime)) {
       intendedPower += (desired.dimmerBrightness / 100) * heaterPower;
     } else {
       logDebug("Dimmer stalled - keeping ON but not consuming budget");
@@ -1055,18 +1092,22 @@ function applyDesiredState(desired, reason) {
   for (let i = 0; i < state.remoteSwitches.length; i++) {
     if (desired.switches[i] !== state.remoteSwitches[i].on) {
       sendRemoteSwitchCommand(i, desired.switches[i], reason);
-      state.remoteSwitches[i].lastChangeTime = Date.now();
+      state.remoteSwitches[i].lastChangeUptime = state.nowUptime;
     }
   }
 
   // Control Dimmer
   if (shouldChangeDimmer(desired)) {
     setLocalDimmer(desired.dimmerOn, desired.dimmerBrightness, reason);
-    state.localDimmer.lastChangeTime = Date.now();
+    state.localDimmer.lastChangeUptime = state.nowUptime;
   }
 }
 
 function checkSystemState() {
+  // Every entry into the control logic takes its own reading of the clock, because the MQTT
+  // fast path reaches this directly as well as the poll does.
+  refreshUptime();
+
   // INITIALIZATION: Wait for all switch statuses, then initialize intended power
   if (!state.initialized) {
     // Check if all switch statuses received
@@ -1085,11 +1126,11 @@ function checkSystemState() {
       // idle stage hold every other load off, so bound the wait and then treat the silent
       // stages as off. Commanding a stage that is already in the desired position is a
       // no-op, so guessing wrong is cheap.
-      if (state.firstIncompleteCheck === 0) {
-        state.firstIncompleteCheck = Date.now();
+      if (state.firstIncompleteCheckUptime === null) {
+        state.firstIncompleteCheckUptime = state.nowUptime;
       }
 
-      if (Date.now() - state.firstIncompleteCheck < config.statusSeedTimeout) {
+      if (state.nowUptime - state.firstIncompleteCheckUptime < config.statusSeedTimeout) {
         logDebug("Waiting for initial remote switch status before controlling");
         updateStatus("Waiting for initial data");
         return;
