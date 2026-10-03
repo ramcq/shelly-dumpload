@@ -60,20 +60,14 @@ let config = {
   shortage: {
     lowSoc: 30,        // % - at or below this the system is short. Ten points above the
                        // generator's autostart
-    highSoc: 90,       // % - at or above it is not. Above what a generator run reaches,
+    highSoc: 90        // % - at or above it is not. Above what a generator run reaches,
                        // since the generator stops charging at 80
-    minGeneration: 500 // W - settles a controller that started between the two and cannot
-                       // know which way the battery was going. "Is any hydro or solar
-                       // meaningfully generating", against up to 20 kW of connected
-                       // capacity. Separate from config.minGenerationPower, which a role
-                       // may disable
   },
 
   // Inverter overload protection
   inverter: {
     emergencyLimit: 13000,  // W - fast-path emergency shutoff for inverter output
-    heaterPower: 2700       // W - this heater's draw, for the headroom check before enabling.
-                            // 0 disables because the heat pump is an enable, not a direct load
+    heaterPower: 2700       // W - this heater's draw, for the headroom check before enabling
   },
 
   // Timing settings. There are no dwell timers: SOC control does not chatter, and the
@@ -89,13 +83,9 @@ let config = {
                                 // for the reason in CONTROLS.md
   checkInterval: 30 * 1000,     // 30 seconds in milliseconds
 
-  // Minimum generation required to enable dump loads (W)
-  // Prevents enabling with no generation (e.g. post-outage, nighttime)
-  // 0 disables the gate
+  // Minimum generation (W) to enable a dump load, and to settle an unresolved shortage
+  // latch on .209
   minGenerationPower: 500,
-
-  // Whether the manual time switch reaches this relay, locally or via the lead relay
-  followTimeSwitch: true,
 
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
@@ -241,9 +231,6 @@ function arrayContains(array, value) {
 
 // Only a dump load sheds on overload or checks headroom: the shortage lead's relay is an
 // enable, not a load it could shed.
-function contributesToInverterOverload() {
-  return config.inverter.heaterPower > 0;
-}
 
 // Match this device against the relay table and take its settings. Everything depends on
 // the answer - thresholds, gates, which topics to follow - so nothing runs before it, and
@@ -267,14 +254,6 @@ function applySettingsForDevice(deviceId) {
     }
 
     state.pollOffset = relay.pollOffset !== undefined ? relay.pollOffset : 0;
-
-    if (state.isShortageLead) {
-      // An enable, not a dump load: it runs regardless of surplus, has nothing to shed on
-      // overload, and hot water is no reason to run a heat pump on a flat battery.
-      config.minGenerationPower = 0;
-      config.inverter.heaterPower = 0;
-      config.followTimeSwitch = false;
-    }
 
     return true;
   }
@@ -302,7 +281,7 @@ function updateShortageLatch() {
   } else if (state.currentSoc >= config.shortage.highSoc) {
     state.shortageLatch = false;
   } else if (state.shortageLatch === null &&
-             state.acGeneration + state.dcGeneration > config.shortage.minGeneration) {
+             state.acGeneration + state.dcGeneration > config.minGenerationPower) {
     state.shortageLatch = false;
   }
 }
@@ -505,16 +484,16 @@ function finishSetup() {
   if (state.isShortageLead) {
     console.log("Shortage band: " + config.shortage.lowSoc + "% to " +
                config.shortage.highSoc + "%, settled by " +
-               config.shortage.minGeneration + "W of generation when unresolved");
+               config.minGenerationPower + "W of generation when unresolved");
   } else {
     console.log("High SOC Threshold: " + state.highSocThreshold + "%");
     console.log("Low SOC Threshold: " + state.lowSocThreshold + "%");
   }
-  console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
-  console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W" +
-             (contributesToInverterOverload() ? "" : " (no overload role)"));
-  console.log("Minimum Generation: " + config.minGenerationPower + "W" +
-             (config.minGenerationPower > 0 ? "" : " (gate disabled)"));
+  if (!state.isShortageLead) {
+    console.log("Emergency Inverter Limit: " + config.inverter.emergencyLimit + "W");
+    console.log("Heater Power (headroom): " + config.inverter.heaterPower + "W");
+    console.log("Minimum Generation: " + config.minGenerationPower + "W");
+  }
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
   if (state.leadRelayTopic) {
     console.log("Lead Relay Monitoring: " + state.leadRelayTopic);
@@ -736,7 +715,7 @@ function processMqttMessage(topic, message) {
       state.inverterOutput = parseFloat(payload.value);
 
       // Fast-path emergency suppression if inverter output exceeds safe limit
-      if (contributesToInverterOverload() &&
+      if (!state.isShortageLead &&
           state.inverterOutput > config.inverter.emergencyLimit && state.relayIsOn) {
         logDebug("EMERGENCY: Inverter output " + state.inverterOutput.toFixed(0) +
                 "W exceeds " + config.inverter.emergencyLimit + "W limit - turning off");
@@ -1067,7 +1046,7 @@ function canSafelyEnable() {
     return false;
   }
 
-  if (!contributesToInverterOverload()) {
+  if (state.isShortageLead) {
     return true;
   }
 
@@ -1098,7 +1077,7 @@ function checkSystemState() {
 
   // PRIORITY 0: Emergency inverter overload protection (overrides everything)
   // Belt-and-braces for the MQTT fast-path check in processMqttMessage
-  if (contributesToInverterOverload() && state.inverterOutput > config.inverter.emergencyLimit) {
+  if (!state.isShortageLead && state.inverterOutput > config.inverter.emergencyLimit) {
     if (state.relayIsOn) {
       turnRelayOff("Inverter overload: " + state.inverterOutput.toFixed(0) + "W");
     }
@@ -1144,7 +1123,7 @@ function checkSystemState() {
 
   // PRIORITY 2: Local input (for the lead relay, this is the manual time switch)
   // For non-lead relays, local input can still manually override
-  if (config.followTimeSwitch && state.inputIsActive) {
+  if (state.inputIsActive) {
     if (!state.relayIsOn && canSafelyEnable()) {
       turnRelayOn("Local input active" + (state.isLeadRelay ? " (manual time switch)" : ""));
     }
@@ -1152,7 +1131,7 @@ function checkSystemState() {
   }
 
   // PRIORITY 3: Lead relay input (manual time switch) - only for non-lead relays
-  if (config.followTimeSwitch && !state.isLeadRelay && state.leadInputActive) {
+  if (!state.isLeadRelay && state.leadInputActive) {
     if (!state.relayIsOn && canSafelyEnable()) {
       turnRelayOn("Lead relay input active (manual time switch ON)");
     }
@@ -1190,8 +1169,7 @@ function checkSystemState() {
   let totalGeneration = state.acGeneration + state.dcGeneration;
   // A minimum of 0 disables the gate outright, rather than resting on the reading being
   // non-negative: a DC source reporting its own draw must not gate anything.
-  let sufficientGeneration = config.minGenerationPower <= 0 ||
-                             totalGeneration >= config.minGenerationPower;
+  let sufficientGeneration = totalGeneration >= config.minGenerationPower;
 
   logDebug("SOC control: Current=" + state.currentSoc + "%, High=" + state.highSocThreshold +
           "%, Low=" + state.lowSocThreshold + "%, Gen=" + totalGeneration.toFixed(0) + "W" +

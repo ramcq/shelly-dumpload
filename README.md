@@ -120,7 +120,7 @@ dump load concern, which the shortage lead drops:
 |---|---|---|---|
 | 0 | Inverter overload | Sheds above `inverter.emergencyLimit`, on MQTT receipt and again on every poll | Dropped |
 | 1 | Shortage | Sheds while the lock is open, and returns. A lock never heard from sheds nothing | Its relay is the answer: closed when there is no shortage, open when there is |
-| 2 | Local input | Manual override, after a headroom check | Dropped — `followTimeSwitch: false` |
+| 2 | Local input | Manual override, after a headroom check | Dropped |
 | 3 | Lead relay input | Follows the manual time switch on .90, after a headroom check | Dropped |
 | 4 | VE.Bus state | Enables only in Inverting (9). Unknown or stale counts as not inverting; nothing received within `config.startupGrace` counts as nothing | A term of shortage, in rung 1 |
 | 5 | SOC band | `high` on, `low` off, after the generation gate and a headroom check | No band |
@@ -138,9 +138,8 @@ dump load concern, which the shortage lead drops:
 - .209 reads its latch back off its own relay contact at startup, trusting it only where the
   switch's last-command `source` shows that something commanded it.
 - **Generation gate:** will not enable below `config.minGenerationPower` (500 W) of
-  AC-coupled plus DC-coupled generation. `config.shortage.minGeneration` is the same reading
-  against the same threshold and is never disabled; this gate is, for a relay that is not a
-  dump load.
+  AC-coupled plus DC-coupled generation. On .209 the same threshold settles an unresolved
+  shortage latch.
 - **Headroom check** before enabling: current inverter output plus `inverter.heaterPower`
   must stay under `inverter.emergencyLimit` (13 kW). Also polled every 30 s.
 - **Turn-off is SOC alone and immediate.** There are no dwell timers in either direction, so
