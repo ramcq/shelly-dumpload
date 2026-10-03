@@ -58,14 +58,10 @@ const EXPORTED = [
   "determineDeviceIdentity",
   "finishSetup",
   // heating-relay-controller
-  "syncedNow",
   "refreshUptime",
   "releaseReason",
-  "shortageRelease",
+  "shortageDue",
   "exerciseDue",
-  "updateExerciseRun",
-  "recordIgnition",
-  "readLastIgnition",
   "outstandingReadings",
   // dhw-controller
   "localHourText",

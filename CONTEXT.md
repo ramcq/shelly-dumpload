@@ -26,10 +26,9 @@ lock; everything else observes the lock rather than the terms behind it.
 _Avoid_: Low battery, deficit, emergency
 
 **Sustained shortage**:
-Shortage that has persisted long enough to be worth burning wood for. Shedding electrical
-load is instant and reversible, so it acts on shortage directly; lighting the boiler is
-neither, so it waits — except when the shortage is a low battery, which is never
-transient.
+Shortage that has lasted 30 minutes, long enough to be worth burning wood for. Shedding
+electrical load is instant and reversible, so it acts on shortage directly; lighting the
+boiler is neither, so it waits.
 
 **Dump load**:
 A mode of use, not a device class: an electrical load run for the purpose of dissipating

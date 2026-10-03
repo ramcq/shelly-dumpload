@@ -305,66 +305,32 @@ thresholds; a 5-minute minimum run time; a 10-second check interval.
 wood burnt. Releasing is permission, never a command — see
 [CONTEXT.md](CONTEXT.md) for the term and [CONTROLS.md](CONTROLS.md) for what it costs
 
-**What it does.** One ladder, one rung at a time, first match wins:
+**What it does.** One ladder, first match wins:
 
-| | Rung | Reads | Waits |
+| | Rung | Reads | Releases |
 |---|---|---|---|
-| 1 | H1, the Grant's back-up heater request | its own `input:0` | nothing — hardware `follow` has already closed the relay |
-| 2 | DHW demand | .123's `input:0`, which is the DHW time clock | nothing |
-| 3 | The power system | `vebus/276/State`, then .209's switch status | `release.sustainedAfter`, 30 min, on VE.Bus; nothing on the lock |
-| 4 | Exercise run | `digitalinput/102/State`, against a timestamp in KVS | `release.exerciseInterval`, 14 days with no observed ignition |
+| 1 | H1, the Grant's back-up heater request | its own `input:0` | at once; hardware `follow` has already closed the relay |
+| 2 | DHW demand | .123's `input:0` (the DHW time clock) | at once |
+| 3 | Shortage | .209's switch status | once the lock has been open `release.sustainedAfter` (30 min) |
+| 4 | Exercise run | the wall clock, `digitalinput/102/State` | every other Sunday at 11:00, unless an ignition was seen in the last 14 days |
 
-Rung 3 reads VE.Bus first and the lock second, which leaves the lock exactly one thing left
-to mean: an unreadable VE.Bus asks for nothing, a VE.Bus that is not inverting releases after
-30 minutes — or at once where the relay is already on — an open lock under a VE.Bus that is
-inverting releases at once, and a closed or unheard lock does nothing. Which case is which,
-and why the ordering is the rule rather than an implementation detail, is in
-[CONTROLS.md](CONTROLS.md); why it follows a relay rather than the shortage terms is
-[ADR 0001](docs/adr/0001-the-heating-side-follows-the-heat-pump-lock.md).
+- A release this script makes lasts at least `release.minimumOnTime` (60 min). A relay found
+  closed at startup is left alone until the lock and the DHW clock have been heard, or for
+  `config.startupGrace` (5 min).
+- Ignitions are remembered in RAM only, so a reboot forgets them.
+- The lock and its open timer survive a broker drop; the DHW clock and boiler state do not.
 
-- **`release.minimumOnTime`,** 60 minutes: a release *this script* granted is not withdrawn
-  inside the hour, whatever changes underneath it. It says nothing about a relay H1 is
-  holding closed, or one a previous run left closed — `follow` opens the first on the H1
-  edge.
-- **The exercise run** — the rule and the reasoning are in
-  [CONTROLS.md](CONTROLS.md#exercise-run). What this script holds is
-  `config.kvs.lastIgnition`, the timestamp every observed ignition
-  rewrites — except a re-ignition inside `release.exerciseHold`, since a lit boiler cycles
-  several times a day. The KVS read is seeded with the current time where there is no record
-  *or none that can be read*, and retried on every poll until it lands.
-- **`syncedNow()`** is `sys.unixtime` only where `sys.last_sync_ts` says the clock has
-  actually been set, and the exercise run is inert without it. It is the one term measured
-  across a reboot; every other wait is timed within a single run, against `sys.uptime` read
-  into `state.nowUptime` once per pass.
-- **On a restart** the contact outlives the script, so a relay found closed is left alone
-  while any of the readings that could justify it is still outstanding; past
-  `config.startupGrace`, silence is taken at face value. Nothing else is reconstructed —
-  rung 3's "already on" clause is what carries a burn through a redeploy.
-- **When the Fröling bridge cannot read the boiler** — `digitalinput/102/Connected` at 0 —
-  `exerciseDue()` returns false and the other three rungs never touch the Fröling. The state
-  is not forgotten, since the bridge keeps publishing it: suppression is read at the point of
-  use. See [CONTROLS.md](CONTROLS.md#when-the-fröling-bridge-falls-over).
-
-**What it reads.** Five subscriptions, every one of them silent between transitions and so
-asked for rather than waited on (see
-[Seeding State From Other Devices](#seeding-state-from-other-devices)): .209's `switch:0`
-status, .123's `input:0`, `vebus/276/State`, `digitalinput/102/State` and
-`digitalinput/102/Connected`. Its own `input:0` it reads locally, and
-`config.kvs.lastIgnition` from KVS.
+**What it reads.** Three subscriptions: .209's `switch:0` status, .123's `input:0` and
+`digitalinput/102/State`. Its own `input:0` it reads locally.
 
 **What it requires.**
-- The one device it belongs on, matched on the ID it reports at startup. .123 is next door in
-  the same cupboard and its relay looks identical, so an unrecognised device runs nothing at
-  all and leaves the relay with H1 in hardware.
-- `follow` with `initial_state: "match_input"` — see the relay configuration table in
-  [CONTROLS.md](CONTROLS.md#relay-configuration).
-- `status_ntf` in the device's MQTT config. The script asserts it, rebooting once if it was
-  off, which every controller here does whether or not anything follows it.
+- The device ID in `config.device`; anywhere else it does nothing.
+- `follow` with `initial_state: "match_input"` (see
+  [CONTROLS.md](CONTROLS.md#relay-configuration)).
+- `status_ntf` in the device's MQTT config, which the script turns on (rebooting) if off.
 - A synchronised clock, for the exercise run only.
 
-**Configuration.** `config.release` carries the four intervals; `config.heatPumpLock` and
-`config.dhwClock` the status and command topics of the two Shellys it follows;
-`config.device` the ID and name. No alerting — the Fröling has its own remote monitoring.
+**Configuration.** `config.release`, `config.heatPumpLock`, `config.dhwClock`, `config.device`.
 
 **Virtual components.** `text:200`, the status display.
 

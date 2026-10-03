@@ -129,19 +129,12 @@ so the two consequences of shortage do not share a trigger:
 | Action | Condition |
 |---|---|
 | Lock the heat pump, shed the DHW immersions and their timers | Shortage — immediately, no exemption |
-| Release the biomass | `SOC < 30%`, or shortage sustained **30 minutes** on the VE.Bus term |
+| Release the biomass | The lock open for **30 minutes** |
 
-Thirty minutes clears the fortnightly generator test run — 20 minutes minimum runtime —
-without knowing anything about generators at all. It also covers every other transient: a
-brief passthrough, a fault that clears, an overload start.
-
-The SOC term keeps its fast path deliberately. In a real shortage the boiler is released at
-30%, well before the generator starts at 20%, so the delay only ever applies to the VE.Bus
-term, where nothing is lost by waiting.
-
-A shortage a controller assumed at startup, and has not yet cleared, is a third case: it
-means nobody knows, not that anything is wrong. It waits the same 30 minutes as the VE.Bus
-term, since the first generation reading above 500 W settles it.
+Thirty minutes clears the fortnightly generator test run (20 minutes minimum runtime, 22.6 in
+practice) and other transients: a brief passthrough, a fault that clears, an overload start,
+or a .209 restart that assumes shortage until it sees generation. A battery shortage waits
+too: at 30% SOC the generator's 20% autostart is still about an hour away.
 
 ---
 
@@ -159,7 +152,7 @@ running, relay open means shortage. No retained flag, no second copy of a thresh
 | Follower | Reads | Does |
 |---|---|---|
 | DHW immersions (.88 .90 .91 .100) | .209's switch status | Sheds, time switch included, while it is open |
-| Boiler Release (.164) | `vebus/276/State` first, then .209's switch status; the DHW time clock and the boiler input for its other rungs | Releases the boiler on sustained shortage |
+| Boiler Release (.164) | .209's switch status | Releases the boiler once it has been open 30 minutes |
 | DHW Enable (.123) | .209's switch status | Opens a shortage DHW window |
 
 **What travels is the lock, not shortage.** A follower asks "is the heat pump running", which
@@ -171,34 +164,6 @@ heat between vessels.
 
 It also makes manual control a first-class operation. Stop .209's script, put its relay where
 you want it, and the biomass and DHW relays follow. Nothing recomputes around you.
-
-.164 needs to distinguish the two terms — release now on a battery shortage, wait 30 minutes
-on a VE.Bus one — and infers the cause rather than holding a threshold:
-
-| VE.Bus | .209 relay | .164 does |
-|---|---|---|
-| Unreadable | Anything | Nothing. A power system that cannot be read is not one to light a fire on |
-| Not inverting | (open, necessarily) | Releases once it has been so for 30 minutes |
-| Inverting (9) | Open | Releases at once: nothing but the battery opens it from here |
-| Inverting (9) | Closed or unheard | Nothing |
-
-**VE.Bus is read first, and that ordering is the rule rather than an implementation detail.**
-.209 opens the lock *because* VE.Bus left Inverting, so while that is true the lock is the
-same fact arriving a second time; taking it at face value would release the boiler the
-instant a generator started. Reading VE.Bus first leaves the lock exactly one thing left to
-mean, so .164 needs no history of its own and infers nothing — the two readings are one
-condition answered in order, not a deduction.
-
-The unreadable row is not caution about a doubtful reading. The Fröling's augers, fan and
-pump all run off the house supply, and the Cerbo is what connects the BMS to the inverter, so
-a Cerbo .164 cannot hear is a power system in trouble: lighting a fire on one risks losing
-circulation to it. The heating side quiesces and waits for an operator, which leaves .164 the
-floor it has anyway — H1, in hardware.
-
-One thing the ordering gives up: .209 restarting on an unresolved latch shows as an open lock
-with VE.Bus at 9, so .164 reads it as the battery and releases at once. At night on a
-mid-band battery with no generation — the only time that persists — burning wood is a
-reasonable answer.
 
 The 30, 90 and 500 W numbers therefore exist in exactly one deployment, on one device.
 
@@ -440,7 +405,7 @@ as zero, leaving the reading in its never-heard state, so that case needs no sec
 | Controller | Blind behaviour |
 |---|---|
 | `thermal-dump-controller.js` (.156) | Suppresses — fan coil and pump off. Recovering waste heat is an optimisation, and burning wood to feed a fan coil is the outcome worth suppressing for |
-| `heating-relay-controller.js` (.164) | The exercise run goes inert, which is what an unavailable boiler input already costs. Its other rungs never read the Fröling |
+| `heating-relay-controller.js` (.164) | Sees no ignitions, so the exercise run is not skipped. No other rung reads the Fröling |
 | `dhw-controller.js` (.123) | Runs its window **unguarded** |
 
 **DHW degrades towards doing more rather than less.** Losing the reading does not make a cold
@@ -457,39 +422,15 @@ subscription; the heating relay is where that rung lives.
 
 ## Exercise run
 
-The Fröling needs to move periodically even when it is not needed for heat — augers, grates
-and ignition free of tar and moisture. This matters *more* now the heat pump takes the bulk
-of the heating load, because a boiler that would previously have run all winter may now sit
-idle in exactly the damp conditions that cause the problem. The point is keeping warm and
-giving every moving part the opportunity to move; the hopper cannot be emptied except by
-digging or burning.
+The Fröling needs to move periodically even when it is not needed for heat, to keep augers,
+grates and ignition free of tar and moisture. That matters more now the heat pump carries the
+bulk of the heating load, because the boiler may sit idle through damp weather.
 
-Fourteen days with no observed ignition releases the boiler. The release is held for one hour
-after ignition, then dropped. Every release also stands for an hour whatever else changes,
-because by then the boiler may have begun an ignition cycle, which is the expensive part —
-so the two are the same hour, and nothing here withdraws a burn it has just asked for. The Fröling still self-gates on buffer temperature, so in
-summer with the immersions holding the buffer at 75 °C the release may sit asserted for days
-before anything happens — harmless, and no reason to build a second buffer control on top of
-the one the boiler already has.
-
-Last-ignition time lives in Shelly KVS, not RAM, or a reboot resets it. Seed it with the
-current time on first run so a redeploy never triggers a burn, and treat a record that
-cannot be read the same way: seeding delays an exercise by fourteen days, while reading a
-missing record as "no ignition ever" lights the boiler on the next poll. Fourteen days is
-also not an interval a script can time, so the term needs a clock the device did not
-invent — one that has actually synchronised, rather than one that merely reads plausibly —
-and is inert without it.
-
-The boiler input is what completes an exercise run — it is how the release learns the boiler
-lit, and so when to stop asking — and it arrives from the Cerbo like everything else. So an
-unavailable boiler input disables the exercise run outright rather than as a separate rule:
-there is nothing to start that could be finished. That is the same answer the power system
-gives for its own reasons, reached from the other end, and a run interrupted that way resumes
-when the Cerbo does.
-
-Any observed ignition resets the fourteen days, whoever asked for it, because they all move
-the same augers — but only an ignition does. A release the boiler declines, which is what
-summer looks like with the immersions holding the buffer at 75 °C, has exercised nothing.
+Every other Sunday at 11:00 the boiler is released for an hour (the minimum on time), unless
+it has been seen to light in the previous 14 days. Fixed slots need nothing to survive a
+reboot; a reboot only forgets recent ignitions, which costs at most one unneeded exercise.
+The Fröling still gates on its own buffer target, so in summer, with the buffer held at 75 °C
+by the immersions, a slot may pass without a burn.
 
 ---
 

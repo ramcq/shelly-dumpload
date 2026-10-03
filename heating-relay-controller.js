@@ -2,24 +2,18 @@
 // Copyright (c) 2025-2026 Robert McQueen
 //
 // Heating Relay Controller for Shelly 1 Mini Gen3 - Boiler Release (192.168.1.164)
-// Closes the Fröling's volt-free release contact when anything on the site wants wood
-// burnt. Releasing is permission, never a command: the boiler holds its own 70 °C buffer
-// target and decides for itself whether it fires.
+// Closes the Fröling's release contact. Releasing is permission: the boiler keeps its own
+// 70 °C buffer target and decides whether to fire.
 //
-// One ladder, first match wins:
-//   1. H1            - the Grant's back-up heater request, on this relay's own input. The
-//                      winter bivalent, and hardware `follow` answers it without this script
-//   2. DHW demand    - the DHW time clock, on .123's input. A request for heat the system
-//                      may not have, so the boiler answers it unconditionally
-//   3. Power system  - VE.Bus not inverting for 30 minutes, or, while it is inverting, the
-//                      heat pump lock open, which can then only be the battery
-//   4. Exercise run  - fourteen days with no observed ignition, so that augers, grates and
-//                      ignition get the opportunity to move
+// Ladder, first match wins:
+//   1. H1           - the Grant's back-up heater request, on this relay's input (hardware
+//                     `follow` acts on it without the script)
+//   2. DHW demand   - the DHW time clock, on .123's input
+//   3. Shortage     - the heat pump lock (.209) open for 30 minutes
+//   4. Exercise run - every other Sunday at 11:00, unless an ignition was seen in the last
+//                     14 days
 //
-// Rung 3 reads VE.Bus itself and the lock second, in that order, because .209 opens the lock
-// *because* VE.Bus left Inverting: while that is true the lock says nothing this controller
-// cannot see for itself, and reading it first would release the boiler the moment a
-// generator started. See CONTROLS.md and docs/adr/0001.
+// Rules and reasoning in CONTROLS.md#shedding-is-not-the-same-as-making-heat.
 
 // ===== Configuration =====
 let config = {
@@ -31,79 +25,39 @@ let config = {
     reconnectDelay: 5000 // ms to wait before reconnection attempt
   },
 
-  // The one device this file belongs on, matched on the ID it reports at startup. .123 is
-  // next door in the same cupboard and its relay looks identical, so a misdirected deploy
-  // is a thing to survive rather than to guess at: an unrecognised device runs nothing.
+  // The only device this script acts on; anywhere else it does nothing.
   device: {
     id: "d885ac0818d0",
     name: "Boiler Release"
   },
 
-  // The heat pump lock (.209). Closed means the heat pump is running, open means the system
-  // is short. This controller follows it rather than deriving shortage from the power
-  // system, which would cost four Victron subscriptions and a second copy of 30/90/500.
+  // The heat pump lock (.209): closed means the heat pump runs, open means shortage.
   heatPumpLock: {
     statusTopic: "shelly1minig3-d885ac0a3668/status/switch:0",
     commandTopic: "shelly1minig3-d885ac0a3668/command"
   },
 
-  // The DHW time clock, which is the input of DHW Enable (.123). Its *input*, not its
-  // relay: the relay also closes for a shortage DHW window, which exists because the heat
-  // is already there. Releasing the boiler on one would be asking for heat on the grounds
-  // of having some.
+  // The DHW time clock, on .123's input. Not its relay, which also closes for a shortage DHW
+  // window, and a window asks for no heat.
   dhwClock: {
     inputTopic: "shelly1minig3-48f6ee8e8780/status/input:0",
     commandTopic: "shelly1minig3-48f6ee8e8780/command"
   },
 
-  // What waits, and for how long. Shedding electrical load is instant and reversible, so
-  // shortage acts on it directly; lighting a boiler is neither.
   release: {
-    // The only rung that waits. Everything else here is someone asking for heat, and this
-    // one is the power system being in trouble - which it may not still be in a minute's
-    // time. Thirty minutes clears the fortnightly generator test run - 20 minutes minimum
-    // runtime - without knowing anything about generators at all.
-    sustainedAfter: 30 * 60 * 1000,
+    sustainedAfter: 30 * 60 * 1000,    // How long the lock must be open before releasing
+    minimumOnTime: 60 * 60 * 1000,     // A release this script makes is not dropped sooner
 
-    // A release this script granted is not withdrawn inside an hour, whatever changes
-    // underneath it. By then the boiler may have begun an ignition cycle, which is the
-    // expensive part and the part that wears, and roughly an hour is a burn: 1500 L from 40
-    // to 70 degC.
-    //
-    // The third such rule in the repo and the only asymmetric one. `surplus` keeps a
-    // symmetric minChangeTime per stage, so that its allocator has something that stands
-    // still to budget against; `soc-relay` had a minimum on time and dropped it, because a
-    // dump load's whole value is that shedding it is free. Here only one direction is
-    // costly, so only one direction waits. It says nothing about a relay H1 is holding
-    // closed - `follow` opens that on the H1 edge, and undoing the hardware is not what
-    // this rule is for.
-    minimumOnTime: 60 * 60 * 1000,
-
-    // The Fröling needs to move periodically even when it is not needed for heat, and that
-    // matters more now the heat pump carries the bulk of the load: a boiler that would once
-    // have run all winter may sit idle in exactly the damp conditions that tar an auger.
-    exerciseInterval: 14 * 24 * 60 * 60 * 1000,
-
-    // Long enough for an ignition to have meant something, short enough not to be a
-    // heating strategy. The boiler still self-gates on buffer temperature.
-    exerciseHold: 60 * 60 * 1000
-  },
-
-  // Where the last observed ignition is written down. RAM would lose it on every reboot,
-  // and a fourteen-day interval measured from a reboot is not an interval at all.
-  kvs: {
-    lastIgnition: "lastIgnition"
+    // Exercise slot: UTC days since the epoch modulo 14 (3 is a Sunday), and the local hour.
+    exerciseCycleDays: 14,
+    exerciseDay: 3,
+    exerciseHour: "11",
+    exerciseInterval: 14 * 24 * 60 * 60 * 1000  // An ignition this recent skips the slot
   },
 
   // Topics to monitor (will be prefixed with N/<portalId>/)
   topics: {
-    vebusState: "vebus/276/State",             // VE.Bus state - the power system rung, read
-                                               // before the lock and never after it
-    boilerOperating: "digitalinput/102/State", // Boiler digital input (10=running, 11=stopped)
-
-    // The bridge holds its last boiler state when modbus drops, so a held state keeps
-    // arriving and keeps looking fresh; this is the only thing that says otherwise.
-    froelingConnected: "digitalinput/102/Connected"
+    boilerOperating: "digitalinput/102/State" // Boiler digital input (10=running, 11=stopped)
   },
 
   // Virtual component IDs
@@ -111,14 +65,8 @@ let config = {
     status: 200
   },
 
-  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
-  // main loop, so a republish asked for in the same breath is answered before anything is
-  // listening. The length hardly matters - a millisecond would do.
-  initialKeepaliveDelay: 1000,
-  startupGrace: 5 * 60 * 1000,  // ms - how long a relay found closed waits for the readings
-                                // that might justify it before silence is taken at
-                                // face value. Five minutes, for the reason in
-                                // CONTROLS.md
+  initialKeepaliveDelay: 1000,  // ms after subscribing before asking for a republish
+  startupGrace: 5 * 60 * 1000,  // ms a relay found closed waits for the readings
   checkInterval: 30 * 1000, // 30 seconds in milliseconds
 
   // Debug mode
@@ -132,67 +80,39 @@ let state = {
   keepaliveTimer: null,
   reconnectTimer: null,
 
-  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
-  // below the state literal.
-  nowUptime: null,           // Uptime at the start of this pass, or null
-                             // while the clock has never been read
-  startedAtUptime: null,     // Uptime when this script started, for the startup grace
+  // Uptime in ms (see docs/adr/0003)
+  nowUptime: null,
+  startedAtUptime: null,
 
   // Device identity
-  identityKnown: false,      // Whether this is the device the file is written for
+  identityKnown: false,
   deviceName: "",
 
   // Relay control state
   relayIsOn: false,          // Current relay state (actual)
-  intendedRelayOn: false,    // Intended relay state (prevents re-entrancy)
-  inputIsActive: false,      // H1, the Grant's back-up heater request, on this relay's input
+  intendedRelayOn: false,    // State last commanded
+  inputIsActive: false,      // H1
+  releasedAtUptime: null,    // When this script last released, for the minimum on time
 
-  // The heat pump lock, as published by .209. Kept across a broker drop: silence is not
-  // .209 saying the battery recovered.
-  lockIsClosed: false,       // Closed means the heat pump is running: no shortage
-  lockKnown: false,          // Never having heard releases nothing, so an undeployed or
-                             // unreachable .209 leaves H1 in hardware and nothing else
+  // The heat pump lock. Kept across a broker drop.
+  lockIsClosed: false,
+  lockKnown: false,
+  lockOpenSinceUptime: null,
 
-  // The DHW time clock, as published by .123. Cleared on a broker drop: a clock may have
-  // moved while this controller was away, and .123 will not say so again until it next does
+  // The DHW time clock. Cleared on a broker drop.
   dhwDemand: false,
   dhwDemandReceived: false,
 
-  // Victron data
-  vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting, etc.)
-  vebusReceived: false,      // Whether a state has ever arrived. Not cleared on a broker
-                             // drop: a stale reading is trouble, an absent one is only a
-                             // controller that has just started
-  vebusStale: false,         // Set by a broker drop. The last reading is kept and shown as
-                             // what it is, rather than zeroed into an invented "Off"
-  vebusShortSinceUptime: null,  // Uptime when the run of non-inverting readings began, or
-                             // null for no such run. Not cleared by a broker drop: the
-                             // readings either side of a blip both say the inverter is
-                             // off-grid abnormal
+  // The boiler input, for observing ignitions
   boilerOperating: false,
-  boilerReceived: false,     // Whether that was published rather than assumed
-  bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
-  bridgeConnectedReceived: false,  // is no claim either way
-
-  // The exercise run
-  lastIgnition: null,        // ms, from KVS. Null while unread, which makes the term inert
-  ignitionReadPending: false,
-  exerciseHoldUntilUptime: null,  // Uptime at which an exercise burn's hold ends, or null
-                             // for no burn under way. The hold is an interval within this
-                             // run; the fourteen days behind it is not, and keeps wall time
-
-  releasedAtUptime: null,    // Uptime when this script last commanded the relay on, for the
-                             // minimum on time. Null for a relay it merely found closed
+  boilerReceived: false,
+  lastIgnitionUptime: null,
 
   // Timer
   timerId: null
 };
 
 // ===== Elapsed time =====
-//
-// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
-// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
-// entry points the device calls; an unreadable `sys` leaves the last value standing.
 function refreshUptime() {
   let sys = Shelly.getComponentStatus("sys");
 
@@ -202,33 +122,20 @@ function refreshUptime() {
 
   state.nowUptime = sys.uptime * 1000;
 
-  // The anchor is stamped by the first reading there is, not by the first attempt. A script
-  // whose opening read failed would otherwise date itself to zero and find, on the next
-  // reading, that a device up five days had run out its grace before it subscribed.
   if (state.startedAtUptime === null) {
     state.startedAtUptime = state.nowUptime;
   }
 }
 
-// Read here rather than in init(), so the grace covers this script's own startup as well
-// as the wait for the Cerbo.
 refreshUptime();
 
-// Whether `sinceUptime` is still inside the startup grace. An interval that cannot be
-// measured has not elapsed, so a clock never read keeps everything waiting rather than
-// declaring a grace it never timed to be over.
-function withinGrace(sinceUptime) {
-  if (state.nowUptime === null || sinceUptime === null) {
+// True until the grace has run out, or while uptime has never been read.
+function withinStartupGrace() {
+  if (state.nowUptime === null || state.startedAtUptime === null) {
     return true;
   }
 
-  return state.nowUptime - sinceUptime < config.startupGrace;
-}
-
-// This run is still new enough that a reading it has never had is only one that has not
-// arrived yet.
-function withinStartupGrace() {
-  return withinGrace(state.startedAtUptime);
+  return state.nowUptime - state.startedAtUptime < config.startupGrace;
 }
 
 // ===== Virtual component handles =====
@@ -252,15 +159,8 @@ function arrayContains(array, value) {
   return false;
 }
 
-// A duration, for a log line and a status field. The largest unit that says something: an
-// exercise clock is read in days and a generator run in minutes, and neither wants the
-// other's precision - while "0m", for a run that has just started, says nothing at all.
 function describeDuration(ms) {
-  let seconds = Math.floor(ms / 1000);
-  if (seconds < 60) {
-    return seconds + "s";
-  }
-  let minutes = Math.floor(seconds / 60);
+  let minutes = Math.floor(ms / 60000);
   if (minutes < 60) {
     return minutes + "m";
   }
@@ -271,48 +171,6 @@ function describeDuration(ms) {
   return Math.floor(hours / 24) + "d";
 }
 
-// Wall clock, in ms, or null where there is none to trust. The exercise run is the only
-// term here that spans a reboot, so it is the only one that needs a clock the device did
-// not invent: fourteen days is not an interval a script can time, and a timestamp written
-// before NTP landed reads as decades once it arrives - which would light the boiler on the
-// first poll after a redeploy. Every other term times an interval within one run, and those
-// are measured against uptime rather than Date.now(): see refreshUptime() and ADR 0003.
-function syncedNow() {
-  let sys = Shelly.getComponentStatus("sys");
-
-  if (!sys || !sys.unixtime || !sys.last_sync_ts) {
-    return null;
-  }
-
-  return sys.unixtime * 1000;
-}
-
-function getVebusStateString(vebusState) {
-  if (vebusState === 0) return "Off";
-  if (vebusState === 1) return "Low Power";
-  if (vebusState === 2) return "Fault";
-  if (vebusState === 3) return "Bulk";
-  if (vebusState === 4) return "Absorption";
-  if (vebusState === 5) return "Float";
-  if (vebusState === 6) return "Storage";
-  if (vebusState === 7) return "Equalize";
-  if (vebusState === 8) return "Passthru";
-  if (vebusState === 9) return "Inverting";
-  if (vebusState === 10) return "Power Assist";
-  if (vebusState === 11) return "Power Supply";
-  if (vebusState === 252) return "External Control";
-  return "Unknown(" + vebusState + ")";
-}
-
-// Never having heard is no claim either way.
-function bridgeIsDown() {
-  return state.bridgeConnectedReceived && !state.bridgeConnected;
-}
-
-// Resolve whether this is the device the file is written for. Everything it commands is one
-// relay, so guessing is not an option a misdirected deploy recovers from: an unrecognised
-// device runs nothing at all and leaves the relay in the unscripted behaviour its
-// configuration gives, which for .164 is H1 released in hardware.
 function determineDeviceIdentity() {
   let info = Shelly.getDeviceInfo();
 
@@ -328,97 +186,31 @@ function determineDeviceIdentity() {
   return true;
 }
 
-// ===== The terms that release the boiler =====
+// ===== The rungs =====
 
-// The power system's rung, as the reason it releases the boiler for, or "" for none.
-//
-// VE.Bus and the heat pump lock are two readings of one condition rather than two rungs:
-// .209 opens the lock *because* VE.Bus left Inverting, so while that is true the lock is the
-// same fact arriving a second time, and reading it first would release the boiler the
-// instant a generator started. Reading VE.Bus first leaves the lock exactly one thing left
-// to mean.
-function shortageRelease() {
-  // The Fröling's augers, fan and pump all run off the house supply, so releasing the boiler
-  // because the power system cannot be read risks lighting a fire and then losing
-  // circulation. An unreadable power system asks for nothing and waits for an operator.
-  if (!state.vebusReceived || state.vebusStale) {
-    return "";
-  }
-
-  if (state.vebusState !== 9) {
-    // Already burning: the thirty minutes was waited out by whatever released it, and a
-    // script that has just restarted cannot measure what it did not watch. A relay H1 alone
-    // is holding closed drops out of this by itself - `follow` opens it on the H1 edge, so
-    // by the next check there is no release here to continue.
-    if (state.relayIsOn) {
-      return "shortage: VE.Bus " + getVebusStateString(state.vebusState);
-    }
-
-    if (state.vebusShortSinceUptime === null ||
-        state.nowUptime - state.vebusShortSinceUptime < config.release.sustainedAfter) {
-      return "";
-    }
-
-    return "shortage: VE.Bus " + getVebusStateString(state.vebusState) + " for " +
-           describeDuration(state.nowUptime - state.vebusShortSinceUptime);
-  }
-
-  // Inverting off-grid with the lock open leaves one cause: the battery. Nothing else opens
-  // it without taking VE.Bus out of Inverting, and a battery at 30% is released by reaching
-  // 90% rather than by the minute passing, so there is nothing here to wait for.
-  if (state.lockKnown && !state.lockIsClosed) {
-    return "shortage: battery";
-  }
-
-  return "";
+function shortageDue() {
+  return state.lockOpenSinceUptime !== null && state.nowUptime !== null &&
+         state.nowUptime - state.lockOpenSinceUptime >= config.release.sustainedAfter;
 }
 
-// Drop the hold once the hour is up, which returns the term to the fourteen-day comparison
-// - by then false, because the ignition that started the burn was written down.
-function updateExerciseRun() {
-  if (state.exerciseHoldUntilUptime === null) {
-    return;
-  }
-
-  if (state.nowUptime < state.exerciseHoldUntilUptime) {
-    return;
-  }
-
-  state.exerciseHoldUntilUptime = null;
-  console.log("Exercise run complete - dropping the release");
-}
-
-// Fourteen days with no observed ignition, held for one hour once it lights.
-//
-// The boiler input is what completes an exercise run - it is how this controller learns the
-// boiler lit, and so when to stop asking - and it arrives from the Cerbo like everything
-// else. With it unavailable there is no exercise run to start or to finish, which is the
-// same answer the power system's rung gives for the same reason, arrived at from the other
-// end. A run interrupted that way is covered by the minimum on time, and resumes.
+// Inside the exercise slot, with a synchronised clock and no recent ignition.
 function exerciseDue() {
-  let now = syncedNow();
+  let sys = Shelly.getComponentStatus("sys");
 
-  // A held state is not a state: nothing to start that could be finished.
-  if (now === null || !state.boilerReceived || bridgeIsDown()) {
+  if (!sys || !sys.unixtime || !sys.time || !sys.last_sync_ts) {
     return false;
   }
 
-  if (state.exerciseHoldUntilUptime !== null) {
-    return true;
-  }
-
-  if (state.lastIgnition === null) {
+  let day = Math.floor(sys.unixtime / 86400);
+  if (day % config.release.exerciseCycleDays !== config.release.exerciseDay ||
+      sys.time.substring(0, 2) !== config.release.exerciseHour) {
     return false;
   }
 
-  return now - state.lastIgnition >= config.release.exerciseInterval;
+  return state.lastIgnitionUptime === null ||
+         state.nowUptime - state.lastIgnitionUptime >= config.release.exerciseInterval;
 }
 
-// The ladder. The first rung that matches releases the boiler and the rest are moot, since
-// the relay has only one position to be in - so the order is what each rung is worth as an
-// explanation, not what it is worth as a reason. H1 first because the hardware has already
-// acted on it; the exercise run last because it is the weakest, satisfied by an ignition
-// from any cause at any time, and in no hurry.
 function releaseReason() {
   if (state.inputIsActive) {
     return "H1";
@@ -428,9 +220,8 @@ function releaseReason() {
     return "DHW demand";
   }
 
-  let shortage = shortageRelease();
-  if (shortage !== "") {
-    return shortage;
+  if (shortageDue()) {
+    return "shortage";
   }
 
   if (exerciseDue()) {
@@ -440,132 +231,37 @@ function releaseReason() {
   return "";
 }
 
-// ===== The exercise clock, which has to survive a reboot =====
-
-function writeLastIgnition(at) {
-  state.lastIgnition = at;
-
-  Shelly.call("KVS.Set", { key: config.kvs.lastIgnition, value: at },
-    function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        console.log("Error recording the ignition: " + error_message);
-      }
-    });
-}
-
-// Read the record back, and seed it on a device that has none.
-//
-// Seeding with the current time is what stops a redeploy lighting the boiler: the record is
-// of *observed* ignitions, and a script that has just started has observed none. An
-// unreadable record is treated the same way, because the two failures are not symmetrical -
-// seeding delays an exercise by fourteen days, while reading a missing key as "no ignition
-// ever" lights the boiler on the next poll.
-function readLastIgnition() {
-  if (state.ignitionReadPending || state.lastIgnition !== null) {
-    return;
-  }
-
-  // Nothing to compare against, and nothing worth writing down: a timestamp taken now would
-  // mean something else after the next NTP reply. The poll asks again.
-  if (syncedNow() === null) {
-    logDebug("No synchronised clock - the exercise run is inert for now");
-    return;
-  }
-
-  state.ignitionReadPending = true;
-
-  Shelly.call("KVS.Get", { key: config.kvs.lastIgnition },
-    function(result, error_code, error_message) {
-      state.ignitionReadPending = false;
-
-      let now = syncedNow();
-
-      if (error_code === 0 && result && result.value > 0) {
-        state.lastIgnition = result.value;
-        if (now !== null) {
-          console.log("Last observed ignition: " +
-                     describeDuration(now - state.lastIgnition) + " ago");
-        }
-        return;
-      }
-
-      if (now === null) {
-        return;
-      }
-
-      console.log("No ignition on record (" + error_message +
-                 ") - seeding the exercise clock with the current time");
-      writeLastIgnition(now);
-    });
-}
-
-// An ignition, wherever it came from. Every one of them exercises the same augers, so every
-// one of them resets the fourteen days - but only one this controller asked for holds the
-// release, since an ignition the heating side wanted needs no permission from here.
-function recordIgnition() {
-  let now = syncedNow();
-
-  if (now === null) {
-    logDebug("Ignition observed with no clock to record it against");
-    return;
-  }
-
-  if (state.exerciseHoldUntilUptime === null && exerciseDue()) {
-    state.exerciseHoldUntilUptime = state.nowUptime + config.release.exerciseHold;
-    console.log("Exercise run alight - holding the release for " +
-               describeDuration(config.release.exerciseHold));
-  }
-
-  // The value is only ever read against fourteen days, and a lit boiler cycles several
-  // times a day, so a re-ignition inside the hold is not worth a flash write.
-  if (state.lastIgnition !== null &&
-      now - state.lastIgnition <= config.release.exerciseHold) {
-    logDebug("Ignition inside the hold - the record already says today");
-    return;
-  }
-
-  writeLastIgnition(now);
-}
-
 // ===== Status =====
 function updateStatus(event) {
   let relayPart = state.deviceName + (state.relayIsOn ? " ON" : " OFF");
 
-  // Every one of these signals is silent between transitions, so a fresh start has none of
-  // them - and reporting an initial value as a reading is an invented one, not a quiet one.
-  let lockPart = ", HP " + (!state.lockKnown
-    ? "?"
-    : (state.lockIsClosed ? "Enabled" : "Locked"));
+  let lockPart = ", HP ";
+  if (!state.lockKnown) {
+    lockPart += "?";
+  } else if (state.lockIsClosed) {
+    lockPart += "Enabled";
+  } else {
+    lockPart += "Locked " + describeDuration(state.nowUptime - state.lockOpenSinceUptime);
+  }
 
-  // The one duration that decides anything now, so the one worth showing.
-  let vebusShortPart = state.vebusShortSinceUptime !== null
-    ? " " + describeDuration(state.nowUptime - state.vebusShortSinceUptime)
-    : "";
-  let vebusPart = ", VE " + (!state.vebusReceived
+  let boilerPart = ", Boiler " + (!state.boilerReceived
     ? "?"
-    : getVebusStateString(state.vebusState) + vebusShortPart +
-      (state.vebusStale ? " (stale)" : ""));
-  let boilerPart = ", Boiler " + (bridgeIsDown()
-    ? "unreadable"
-    : (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF")));
+    : (state.boilerOperating ? "ON" : "OFF"));
   let dhwPart = ", DHW " + (!state.dhwDemandReceived
     ? "?"
     : (state.dhwDemand ? "ON" : "OFF"));
   let h1Part = ", H1 " + (state.inputIsActive ? "ON" : "OFF");
 
-  // The burn clock is the one value here written down against wall clock rather than timed
-  // within this run, so it is read back against the same clock or not at all.
-  let clock = syncedNow();
-  let burnPart = (state.lastIgnition === null || clock === null)
+  let burnPart = state.lastIgnitionUptime === null
     ? ""
-    : ", burn " + describeDuration(clock - state.lastIgnition) + " ago";
+    : ", lit " + describeDuration(state.nowUptime - state.lastIgnitionUptime) + " ago";
 
   let reason = releaseReason();
   let releasePart = reason !== "" ? ", Released: " + reason : "";
 
   let eventPart = event ? ": " + event : "";
 
-  let statusMessage = relayPart + lockPart + vebusPart + boilerPart + dhwPart + h1Part +
+  let statusMessage = relayPart + lockPart + boilerPart + dhwPart + h1Part +
                       burnPart + releasePart + eventPart;
 
   logDebug("Status: " + statusMessage);
@@ -621,25 +317,16 @@ function finishSetup() {
 
   setupEventHandlers();
   connectMqtt();
-
-  // The exercise clock, before the first poll wants it. It needs a synchronised clock, so
-  // the poll asks again for as long as there is none.
-  readLastIgnition();
-
   startMonitoring();
 
   console.log("=== Heating Relay Controller Configuration ===");
   console.log("Device: " + state.deviceName);
-  console.log("Releases the boiler on: H1, DHW demand, power system, exercise run");
-  console.log("VE.Bus not inverting: released after " +
+  console.log("Releases the boiler on: H1, DHW demand, shortage, exercise run");
+  console.log("Shortage: heat pump lock open for " +
              (config.release.sustainedAfter / 60000) + " minutes");
-  console.log("VE.Bus inverting with the heat pump locked: released at once (the battery)");
-  console.log("Minimum on time: " +
-             (config.release.minimumOnTime / 60000) + " minutes");
-  console.log("Exercise run: " +
-             (config.release.exerciseInterval / (24 * 60 * 60 * 1000)) +
-             " days with no observed ignition, held " +
-             (config.release.exerciseHold / 60000) + " minutes");
+  console.log("Minimum on time: " + (config.release.minimumOnTime / 60000) + " minutes");
+  console.log("Exercise run: every " + config.release.exerciseCycleDays + " days at " +
+             config.release.exerciseHour + ":00 unless the boiler has lit since");
   console.log("Heat Pump Lock Monitoring: " + config.heatPumpLock.statusTopic);
   console.log("DHW Time Clock Monitoring: " + config.dhwClock.inputTopic);
   console.log("Check Interval: " + (config.checkInterval / 1000) + " seconds");
@@ -678,9 +365,8 @@ function setupEventHandlers() {
         return;
       }
 
-      // Something else moved the contact, and on this relay that something is usually the
-      // hardware: `follow` reasserts itself on an H1 edge, so an H1 request ending opens a
-      // relay this controller may still want closed for a shortage or an exercise run.
+      // Usually `follow` opening the relay on an H1 edge; check whether anything else
+      // still wants it closed.
       state.relayIsOn = newState;
       state.intendedRelayOn = newState;
       logDebug("Relay state changed externally to: " + newState);
@@ -703,13 +389,9 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  // A message can start the run of non-inverting readings, so it takes its own reading of
-  // the clock rather than using whatever the last poll left behind.
   refreshUptime();
 
   try {
-    // The heat pump lock, which is the whole of what this controller knows about the power
-    // system apart from the VE.Bus state it uses to tell the two shortage terms apart.
     if (topic === config.heatPumpLock.statusTopic) {
       let payload = JSON.parse(message);
       if (payload.output !== undefined) {
@@ -717,6 +399,12 @@ function processMqttMessage(topic, message) {
         let wasKnown = state.lockKnown;
         state.lockIsClosed = Boolean(payload.output);
         state.lockKnown = true;
+
+        if (state.lockIsClosed) {
+          state.lockOpenSinceUptime = null;
+        } else if (state.lockOpenSinceUptime === null) {
+          state.lockOpenSinceUptime = state.nowUptime;
+        }
 
         if (!wasKnown || wasClosed !== state.lockIsClosed) {
           console.log("Heat pump lock " +
@@ -727,7 +415,6 @@ function processMqttMessage(topic, message) {
       return;
     }
 
-    // The DHW time clock, on .123's input.
     if (topic === config.dhwClock.inputTopic) {
       let payload = JSON.parse(message);
       if (payload.state !== undefined) {
@@ -757,48 +444,7 @@ function processMqttMessage(topic, message) {
       return;
     }
 
-    if (relativeTopic === config.topics.vebusState) {
-      let prevState = state.vebusState;
-      state.vebusState = parseInt(payload.value);
-      state.vebusReceived = true;
-      state.vebusStale = false;
-
-      // When this run of non-inverting readings began, which is the only thing here that
-      // waits. A broker drop does not disturb it: the readings either side of a blip both
-      // say the inverter is off-grid abnormal, and the relay carries the answer meanwhile.
-      if (state.vebusState !== 9) {
-        if (state.vebusShortSinceUptime === null) {
-          state.vebusShortSinceUptime = state.nowUptime;
-        }
-      } else {
-        state.vebusShortSinceUptime = null;
-      }
-
-      if (prevState !== state.vebusState) {
-        console.log("VE.Bus state: " + state.vebusState +
-                   " (" + getVebusStateString(state.vebusState) + ")");
-      }
-    }
-
-    // Read at the point of use, never acted on here: the bridge keeps publishing its held
-    // state, so a controller that forgot it would take the next republish for a reading.
-    // Ignitions are unaffected - a republish of the same value is no edge.
-    if (relativeTopic === config.topics.froelingConnected) {
-      let wasConnected = state.bridgeConnected;
-      let wasKnown = state.bridgeConnectedReceived;
-      state.bridgeConnected = (parseInt(payload.value) === 1);
-      state.bridgeConnectedReceived = true;
-
-      if (!wasKnown || wasConnected !== state.bridgeConnected) {
-        console.log("Fröling bridge " + (state.bridgeConnected
-          ? "reading the boiler again"
-          : "cannot read the boiler - suspending the exercise run"));
-      }
-
-    }
-
-    // The boiler input (10=running, 11=stopped). Its rising edge is the only observation of
-    // an ignition this controller ever gets, and the exercise clock is made of them.
+    // The boiler input. A stopped-to-running edge is an ignition; the first reading is not.
     if (relativeTopic === config.topics.boilerOperating) {
       let wasOperating = state.boilerOperating;
       let wasKnown = state.boilerReceived;
@@ -810,7 +456,7 @@ function processMqttMessage(topic, message) {
       }
 
       if (state.boilerOperating && wasKnown && !wasOperating) {
-        recordIgnition();
+        state.lastIgnitionUptime = state.nowUptime;
       }
     }
   } catch (e) {
@@ -835,37 +481,23 @@ function handleMqttConnected() {
   MQTT.subscribe(config.dhwClock.inputTopic, processMqttMessage);
   logDebug("Subscribed to the DHW time clock: " + config.dhwClock.inputTopic);
 
-  // Ask for a full republish, but from a later turn of the main loop than the subscriptions
-  // above - see config.initialKeepaliveDelay.
+  // Ask for republishes once the subscriptions are live
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
     requestFollowedStatus(true);
   });
 
-  // Keep asking for a republish until both silent readings have arrived. Neither
-  // vebus/276/State nor the boiler input has anything to publish between transitions - one
-  // changes when a generator runs, months apart, the other when the boiler starts or stops
-  // firing - so both are only ever seen in a burst, and both are terms here.
+  // Keep asking until each silent reading has arrived
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(state.vebusReceived && state.boilerReceived &&
-                  state.bridgeConnectedReceived);
+    sendKeepalive(state.boilerReceived);
     requestFollowedStatus(false);
   });
 }
 
-// Shelly publishes status on change and does not retain it, so a follower that has just
-// started believes the heat pump is running and the time clock off until each device next
-// moves - which for a relay's input, with no telemetry to drift, can be hours.
-// `status_update` on a device's command topic makes it republish every component on the
-// topics this controller already subscribes to, so asking costs no extra subscription and
-// no HTTP.
-//
-// Asked on connect, and again on every keepalive until the answer arrives, since the
-// request is as losable as the answer. Forced on connect, because a value already held may
-// have changed while the broker was away and neither device will repeat it.
+// Ask the followed Shellys to republish their status; forced on connect.
 function requestFollowedStatus(force) {
   if (force || !state.lockKnown) {
     askToRepublish(config.heatPumpLock.commandTopic, "the heat pump lock");
@@ -900,24 +532,12 @@ function sendKeepalive(suppressRepublish) {
   logDebug("Sent keepalive" + (suppressRepublish ? " (suppress-republish)" : ""));
 }
 
-// What a drop does to a flag differs by what the value is for. The time clock may have
-// moved while the broker was away, so forgetting it is right: it will be asked again on
-// reconnect. The lock is kept, because silence is not .209 saying the battery recovered, and
-// so is the run of non-inverting readings: the readings either side of a blip both say the
-// inverter is off-grid abnormal, and a thirty minutes restarted on every blip never elapses.
-// The boiler state is forgotten, which suspends the exercise run until the Cerbo is back.
-//
-// The VE.Bus state is marked stale rather than zeroed. A stale reading asks for nothing
-// either way, so zeroing it bought nothing and cost a status line that read "VE Off" - a
-// reading nobody sent.
+// The lock and its timer are kept: silence is not .209 saying the battery recovered.
 function resetMqttData() {
-  state.vebusStale = true;
   state.dhwDemand = false;
   state.dhwDemandReceived = false;
   state.boilerOperating = false;
   state.boilerReceived = false;
-  state.bridgeConnected = true;
-  state.bridgeConnectedReceived = false;
 
   logDebug("Reset MQTT data due to disconnection");
 }
@@ -932,8 +552,7 @@ function scheduleReconnect() {
   }
 }
 
-// Bring the device's own MQTT config up to what this controller needs. Returns true if a
-// reconfigure is under way, which ends in a reboot and so ends this script's run.
+// Returns true if a reconfigure (and so a reboot) is under way.
 function ensureMqttConfig() {
   let mqttConfig = Shelly.getComponentConfig("mqtt");
   if (!mqttConfig) {
@@ -950,9 +569,7 @@ function ensureMqttConfig() {
     needsConfig = true;
     logDebug("MQTT server doesn't match, reconfiguring");
   } else if (mqttConfig.status_ntf === false) {
-    // This relay's own position is what a person reads in VRM to see why the boiler is
-    // burning. Tested for false, not for not-true: a firmware without the key must not
-    // reboot on every start.
+    // Tested for false so that firmware without the key is not rebooted on every start
     needsConfig = true;
     logDebug("MQTT status notifications are off, reconfiguring");
   }
@@ -987,8 +604,6 @@ function connectMqtt() {
     state.reconnectTimer = null;
   }
 
-  // Handlers and config first, unconditionally: the device's MQTT client is usually
-  // connected before this script starts, and both used to sit behind that early return.
   MQTT.setConnectHandler(handleMqttConnected);
 
   MQTT.setDisconnectHandler(function() {
@@ -1037,8 +652,6 @@ function updateDeviceState() {
     }
   }
 
-  // H1, the Grant's back-up heater request. Wired to this relay's input, which `follow`
-  // already acts on: reading it here is how the script knows not to undo that.
   let inputStatus = Shelly.getComponentStatus("input:0");
   if (inputStatus && inputStatus.state !== undefined) {
     if (state.inputIsActive !== inputStatus.state) {
@@ -1094,47 +707,19 @@ function turnRelayOff(reason) {
   );
 }
 
-// Which followed readings have never arrived. Every one of them could justify a release,
-// and each is silent between transitions, so a fresh start has none of them.
-function outstandingReadings() {
-  let missing = [];
-
-  if (!state.lockKnown) {
-    missing.push("the heat pump lock");
-  }
-  if (!state.dhwDemandReceived) {
-    missing.push("the DHW time clock");
-  }
-  if (!state.boilerReceived) {
-    missing.push("the boiler state");
-  }
-  if (!state.vebusReceived) {
-    missing.push("the inverter state");
-  }
-
-  return missing.join(", ");
-}
-
 function checkSystemState() {
-  // Every entry into the control logic takes its own reading of the clock, because the MQTT
-  // handlers reach this directly as well as the poll does.
   refreshUptime();
 
   updateStatus("Monitoring");
 
-  // Commanding this relay before the device is known would burn someone else's wood.
   if (!state.identityKnown) {
     logDebug("Identity not yet known - no action");
     return;
   }
 
-  updateExerciseRun();
-
   let reason = releaseReason();
 
-  // A relay already where it should be is not commanded. That matters most for H1, which
-  // hardware `follow` has already answered: a Switch.Set overrides follow until the next
-  // input edge, and there is nothing to gain by taking that over.
+  // Not commanded if already on, so as not to override `follow` for H1
   if (reason !== "") {
     if (!state.relayIsOn) {
       turnRelayOn(reason);
@@ -1146,24 +731,15 @@ function checkSystemState() {
     return;
   }
 
-  // A release this script granted stands for an hour whatever changes underneath it. Not a
-  // relay it merely found closed: that one belongs to whatever closed it.
   if (state.releasedAtUptime !== null &&
       state.nowUptime - state.releasedAtUptime < config.release.minimumOnTime) {
-    logDebug("Nothing is asking for the boiler, but it was released " +
-            describeDuration(state.nowUptime - state.releasedAtUptime) +
-            " ago - leaving it alone");
+    logDebug("Within the minimum on time - leaving the release");
     return;
   }
 
-  // Nothing asking is not the same as nothing having answered. A restart finds the contact
-  // wherever the last run left it, and every reading that could justify it arrives over
-  // MQTT some time later, so an incomplete picture waits rather than dropping a burn on
-  // every redeploy. Past the grace, silence is taken at face value.
-  let outstanding = outstandingReadings();
-
-  if (outstanding !== "" && withinStartupGrace()) {
-    logDebug("Released, and still waiting on " + outstanding + " - leaving the relay alone");
+  // A relay found closed at startup waits until the lock and the DHW clock have been heard.
+  if ((!state.lockKnown || !state.dhwDemandReceived) && withinStartupGrace()) {
+    logDebug("Released, and still waiting on the lock or the DHW clock");
     return;
   }
 
@@ -1172,11 +748,6 @@ function checkSystemState() {
 
 function checkStatus() {
   updateDeviceState();
-
-  // Until the record has been read there is no exercise term at all, so keep asking. It
-  // needs a synchronised clock, and a device that has just booted may not have one yet.
-  readLastIgnition();
-
   checkSystemState();
 }
 
