@@ -44,13 +44,8 @@ let config = {
   // `low` is derived as `high - 1` unless stated: a wide band has to be stated outright.
   // A device not listed here runs nothing, which is what makes a misdirected deploy safe.
   //
-  // `pollOffset` is where this relay's poll sits in the check interval, so that a lock
-  // closing does not release every immersion in the same instant. It is grouped by tank
-  // rather than by device, because that is what the loads are: the two left elements share
-  // a slot, the top one sitting in the stratified layer where it almost never calls, so the
-  // pair is one 2.7 kW load in practice. Absent means 0, which is what the shortage lead
-  // wants - it has no dump load to space out, and its relay is the signal the others wait
-  // on.
+  // `pollOffset`: how long this relay waits to enable after the lock closes or the time
+  // switch turns on, so the immersions come on one tank at a time. Absent means 0.
   relays: [
     { id: "543204558c6c", name: "DHW Left Top",     high: 96, pollOffset: 0 },
     { id: "543204558fc8", name: "DHW Left Bottom",  high: 94, leadRelay: true, pollOffset: 0 },
@@ -172,7 +167,9 @@ let state = {
   deviceName: "",
   highSocThreshold: 0,
   lowSocThreshold: 0,
-  pollOffset: 0,             // Where this relay's poll sits in the check interval
+  pollOffset: 0,             // Delay before enabling on a lock or time switch edge
+  enableHeldUntilUptime: null,  // Uptime before which this relay may not enable
+  edgeTimer: null,
 
   // Timer
   timerId: null
@@ -662,15 +659,9 @@ function processMqttMessage(topic, message) {
         logDebug("Lead input updated via MQTT: " + state.leadInputActive);
         updateStatus("Lead input changed");
 
-        // The other edge that reaches all four immersions at once, and the more frequent
-        // one: the clock runs twice a day where the lock may open a handful of times a
-        // year. A time switch turning on can only enable - priority 3 turns the relay on
-        // and returns - so it waits for this relay's poll, exactly as a release does. The
-        // lead relay is not on this path at all: its own input closes it in hardware and
-        // it sits at offset 0, so the left tank still comes on with an audible click when
-        // the clock closes, which is the feedback someone standing at the switch wants.
-        // Turning off can shed, through the gates below priority 3, so it keeps the edge.
-        if (!state.leadInputActive) {
+        if (state.leadInputActive) {
+          checkAfterOffset();
+        } else {
           checkSystemState();
         }
       }
@@ -691,13 +682,9 @@ function processMqttMessage(topic, message) {
 
         updateStatus("Heat pump lock changed");
 
-        // Shedding is the safety direction and happens on the edge. Releasing waits for
-        // this relay's next poll, which is what spaces the four immersions out: .209's
-        // message reaches all of them in the same instant, and four relays deciding on one
-        // inverter reading is four relays deciding blind to each other. Nothing is queued
-        // to make that happen - the poll re-reads the whole ladder, so a lock that opens
-        // again in the meantime is simply a shed, with no pending enable to cancel.
-        if (!state.lockIsClosed) {
+        if (state.lockIsClosed) {
+          checkAfterOffset();
+        } else {
           checkSystemState();
         }
       }
@@ -1050,7 +1037,36 @@ function turnRelayOff(reason) {
 }
 
 // Check if there is sufficient inverter headroom to safely enable the relay
+// An edge that reaches every immersion at once (the lock closing, the time switch turning
+// on) holds this relay's enables for its pollOffset, then checks again.
+function checkAfterOffset() {
+  if (state.pollOffset <= 0) {
+    checkSystemState();
+    return;
+  }
+
+  refreshUptime();
+  if (state.nowUptime !== null) {
+    state.enableHeldUntilUptime = state.nowUptime + state.pollOffset;
+  }
+
+  if (state.edgeTimer) {
+    Timer.clear(state.edgeTimer);
+  }
+  // A second's margin, since uptime is read in whole seconds
+  state.edgeTimer = Timer.set(state.pollOffset + 1000, false, function() {
+    state.edgeTimer = null;
+    checkSystemState();
+  });
+}
+
 function canSafelyEnable() {
+  if (state.enableHeldUntilUptime !== null && state.nowUptime !== null &&
+      state.nowUptime < state.enableHeldUntilUptime) {
+    logDebug("Waiting for this relay's offset before enabling");
+    return false;
+  }
+
   if (!contributesToInverterOverload()) {
     return true;
   }
@@ -1197,29 +1213,6 @@ function checkStatus() {
   checkSystemState();
 }
 
-// How long to wait before starting the loop, so that this relay's polls land in its own
-// slot. The offsets only separate anything if the relays agree on where the window starts,
-// and their script start times do not: deployed a few seconds apart, two relays can share a
-// tick however different their offsets are, since it takes only start plus offset to come
-// out the same modulo the interval. Wall clock is the one origin they do share, so a relay
-// polls when the clock comes round to its offset. Without a synchronised clock there is
-// nothing shared to anchor to, and the offset falls back to being start-relative - worth
-// what it was worth before, which is something for a site-wide restart and nothing for a
-// staggered one.
-function pollPhaseDelay() {
-  let sys = Shelly.getComponentStatus("sys");
-
-  if (!sys || !sys.unixtime || !sys.last_sync_ts) {
-    logDebug("No synchronised clock - phasing the poll from this script's start");
-    return state.pollOffset;
-  }
-
-  let period = config.checkInterval / 1000;
-  let slot = state.pollOffset / 1000;
-
-  return ((slot - (sys.unixtime % period) + period) % period) * 1000;
-}
-
 function startMonitoring() {
   logDebug("Starting monitoring with interval: " + (config.checkInterval / 1000) + " seconds");
 
@@ -1230,24 +1223,8 @@ function startMonitoring() {
     logDebug("Cleared existing timer");
   }
 
-  // The first check is never staggered. A restart can find this relay closed with the lock
-  // open, and a shed must not wait on an offset whose only job is to space out enabling.
   checkStatus();
 
-  // The loop itself starts on this relay's slot, and keeps it for as long as the script
-  // runs. See config.relays.
-  let delay = pollPhaseDelay();
-
-  if (delay > 0) {
-    logDebug("Waiting " + (delay / 1000) + "s for this relay's slot before polling");
-    Timer.set(delay, false, startPolling);
-    return;
-  }
-
-  startPolling();
-}
-
-function startPolling() {
   state.timerId = Timer.set(config.checkInterval, true, function() {
     logDebug("Timer triggered check");
     checkStatus();

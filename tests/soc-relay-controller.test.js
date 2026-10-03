@@ -696,10 +696,34 @@ test("an immersion keeps its own VE.Bus gate when no lock answers", () => {
     "a dump load must be safe with nothing published by .209 at all");
 });
 
-test("closing the lock gives the time switch back on the next poll", () => {
-  // .209's message reaches all four immersions in the same instant, so coming back on the
-  // edge is four relays deciding against one inverter reading, each blind to the others.
-  // The release waits for this relay's own poll instead; the shed above does not.
+// The right tank, which waits 10 s to enable after an edge.
+function loadRight() {
+  return loadRelay(RIGHT);
+}
+
+function waitedOffset(mod, timers) {
+  const t = timers.filter((x) => x.repeat === false).pop();
+  advanceClock(t.ms);
+  t.fn();
+}
+
+test("closing the lock enables after this relay's offset", () => {
+  const { mod, calls, timers } = loadRight();
+  settle(mod, false);
+  mod.state.leadInputActive = true;
+  victron(mod, "vebusState", INVERTING);
+  victron(mod, "batterySOC", 50);
+
+  lock(mod, false);
+  lock(mod, true);
+  mod.checkSystemState(); // a poll landing inside the offset
+  assert.deepStrictEqual(switchCommands(calls), []);
+
+  waitedOffset(mod, timers);
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+});
+
+test("the left tank enables on the edge", () => {
   const { mod, calls } = loadImmersion();
   settle(mod, false);
   mod.state.leadInputActive = true;
@@ -709,30 +733,21 @@ test("closing the lock gives the time switch back on the next poll", () => {
   lock(mod, false);
   lock(mod, true);
 
-  assert.deepStrictEqual(switchCommands(calls), [],
-    "the edge that unlocks the heat pump must not close four relays at once");
-
-  mod.checkSystemState();
-
-  assert.deepStrictEqual(switchCommands(calls), [true],
-    "the first poll after the edge has to give the time switch back");
+  assert.deepStrictEqual(switchCommands(calls), [true]);
 });
 
-test("nothing is left pending, so a lock that reopens is just a shed", () => {
-  // The poll re-reads the whole ladder rather than acting on an intention formed earlier,
-  // which is why the release needs no cancellation path.
-  const { mod, calls } = loadImmersion();
+test("a lock that reopens within the offset is just a shed", () => {
+  const { mod, calls, timers } = loadRight();
   settle(mod, false);
   mod.state.leadInputActive = true;
   victron(mod, "vebusState", INVERTING);
   victron(mod, "batterySOC", 50);
 
-  lock(mod, true);  // released, waiting for its poll
-  lock(mod, false); // and short again before the poll came round
-  mod.checkSystemState();
+  lock(mod, true);
+  lock(mod, false);
+  waitedOffset(mod, timers);
 
-  assert.deepStrictEqual(switchCommands(calls), [],
-    "a queued enable closed a relay the lock had already locked again");
+  assert.deepStrictEqual(switchCommands(calls), []);
 });
 
 test("a lost broker does not close the lock", () => {
@@ -798,30 +813,24 @@ test("the shortage lead asks nobody anything", () => {
 
 // ===== Spacing the release out =====
 
-test("the time switch turning on waits for this relay's poll", () => {
-  // The lead relay's input status reaches all three followers in the same instant, and
-  // twice a day, so it is the busier version of the lock's release.
-  const { mod, calls } = loadImmersion();
+test("the time switch turning on enables after this relay's offset", () => {
+  const { mod, calls, timers } = loadRight();
   settle(mod, false);
   victron(mod, "vebusState", INVERTING);
   victron(mod, "batterySOC", 50);
   lock(mod, true);
 
   leadInput(mod, true);
+  assert.deepStrictEqual(switchCommands(calls), []);
 
-  assert.deepStrictEqual(switchCommands(calls), [],
-    "the clock closing must not close three relays against one inverter reading");
-
-  mod.checkSystemState();
-
-  assert.deepStrictEqual(switchCommands(calls), [true],
-    "the poll after the clock closed has to make hot water");
+  waitedOffset(mod, timers);
+  assert.deepStrictEqual(switchCommands(calls), [true]);
 });
 
 test("the time switch turning off still sheds on the edge", () => {
   // Below its band, losing the clock is the only thing keeping this relay on, so the edge
   // is a shed - and shedding never waits.
-  const { mod, calls } = loadImmersion();
+  const { mod, calls } = loadRight();
   settle(mod, true);
   victron(mod, "vebusState", INVERTING);
   victron(mod, "batterySOC", 50);
@@ -851,73 +860,6 @@ test("the poll offsets separate the tanks, not the devices", () => {
 
   assert.strictEqual(loadShortageLead().mod.state.pollOffset, 0,
     "the shortage lead has no dump load to space out, and everything else waits on it");
-});
-
-// How long this relay waits before its loop starts, given the clock it reads at startup.
-// Zero means it began polling straight away, already on its slot.
-function pollWait(deviceId, unixtime) {
-  const { mod, timers } = loadRelay(deviceId);
-  global.Shelly.getComponentStatus = function (key) {
-    return key === "sys" && unixtime
-      ? { unixtime: unixtime, last_sync_ts: unixtime - 800 }
-      : null;
-  };
-
-  mod.finishSetup();
-
-  const deferred = timers.filter((t) => t.repeat === false);
-  if (deferred.length === 0) {
-    return 0;
-  }
-  assert.strictEqual(deferred.length, 1, "more than one timer held the loop back");
-  return deferred[0].ms;
-}
-
-test("the poll is phased to the clock, so the offsets share an origin", () => {
-  // Start times do not agree on where a window begins - deploy two relays 20 seconds apart
-  // with offsets 10 seconds apart and they land on the same tick. The clock does agree, so
-  // each relay waits for the moment the clock comes round to its own slot, whenever it
-  // happened to start.
-  const at = 1788350600; // 20 seconds into a 30-second window
-
-  [[LEFT_TOP, 0], [LEAD_RELAY, 0], [RIGHT, 10], [ANNEX, 20]].forEach((pair) => {
-    const wait = pollWait(pair[0], at);
-    assert.strictEqual((at + wait / 1000) % 30, pair[1],
-      pair[0] + " does not poll in its own slot");
-  });
-});
-
-test("an unsynchronised clock falls back to a start-relative offset", () => {
-  // Nothing shared to anchor to, so the offset is worth what it was before: something for
-  // a site-wide restart, nothing for a staggered one.
-  assert.strictEqual(pollWait(ANNEX, 0), 20 * 1000);
-});
-
-test("a staggered relay checks at once, then starts its loop late", () => {
-  const { mod, timers } = loadRelay(ANNEX);
-
-  mod.finishSetup();
-
-  const late = timers.filter((t) => t.repeat === false && t.ms === 20 * 1000);
-  assert.strictEqual(late.length, 1, "the annex did not hold its loop back");
-  assert.deepStrictEqual(timers.filter((t) => t.repeat === true), [],
-    "the loop started in phase with every other relay");
-
-  late[0].fn();
-
-  assert.strictEqual(
-    timers.filter((t) => t.repeat === true && t.ms === mod.config.checkInterval).length, 1,
-    "the loop never started");
-});
-
-test("an unstaggered relay starts its loop straight away", () => {
-  const { mod, timers } = loadImmersion();
-
-  mod.finishSetup();
-
-  assert.strictEqual(
-    timers.filter((t) => t.repeat === true && t.ms === mod.config.checkInterval).length, 1,
-    "a zero offset still delayed the loop");
 });
 
 // ===== The latch has one durable copy, and .209 keeps it =====

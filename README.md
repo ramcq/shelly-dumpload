@@ -145,10 +145,9 @@ dump load concern, which the shortage lead drops:
   must stay under `inverter.emergencyLimit` (13 kW). Also polled every 30 s.
 - **Turn-off is SOC alone and immediate.** There are no dwell timers in either direction, so
   a hydro trip sheds the load at once.
-- **Each relay decides in its own slot** of the check interval — `config.relays[].pollOffset`,
-  anchored to `unixtime`, falling back to phasing from its own start on a device whose clock
-  has never synchronised. Only enabling waits; shedding keeps the edge, and a script's first
-  check is not held back. See [CONTROLS.md](CONTROLS.md).
+- **On the lock closing or the time switch turning on,** enabling waits
+  `config.relays[].pollOffset` (0, 10 or 20 s by tank). Shedding never waits. See
+  [CONTROLS.md](CONTROLS.md).
 
 **What it reads.** Five Victron paths — `system/0/Dc/Battery/Soc`,
 `system/0/Ac/PvOnOutput/L1/Power`, `dcsource/279/Dc/0/Power`, `vebus/276/State`,
