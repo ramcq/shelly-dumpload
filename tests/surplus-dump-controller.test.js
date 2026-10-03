@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 Robert McQueen
 //
-// Covers the parts of surplus-dump-controller.js that are easy to get wrong and
-// expensive to get wrong on live plant: which device a stage commands, how many
-// MQTT subscriptions the script holds, whether one quiet stage can stall the rest,
-// and the two inverter limits, each of which exists because an overload got past
-// its predecessor. Run with: node --test tests/
+// Tests for surplus-dump-controller.js. Run with: node --test tests/
 
 const test = require("node:test");
 const assert = require("node:assert");
@@ -76,19 +72,9 @@ test("surplus below one heater leaves every constant stage off", () => {
 });
 
 // ===== The emergency inverter limit =====
-//
-// The fast path exists because the poll is too slow to matter: generation can go
-// from carrying the dumps to carrying nothing in one step - a hydro trip, a
-// generator disconnect - and 8 kW of stages are then on the battery until someone
-// notices. It sheds on the message rather than on the next five-second check.
-//
-// The 13 kW figure is not a design margin. The 2026-02-17 overload peaked at
-// 13,009 W when the dumps and the immersions came on together after a generator
-// disconnect with no solar, and the 14 kW threshold it was carrying at the time
-// did not trigger. Anything that raises this number is undoing that.
+// Sheds on the MQTT message, not the next poll.
 
-// A controller past initialisation with every stage running, which is the only
-// state in which an overload is this script's to shed.
+// A controller past initialisation with every stage running.
 function dumping(mod) {
   mod.state.mqttConnected = true;
   mod.state.initialized = true;
@@ -118,7 +104,7 @@ test("the limit is the figure the incident passed, not a round number above it",
   assert.deepStrictEqual(switchCommands(published), [],
     "at the limit exactly, nothing sheds");
 
-  victron(mod, "inverterOutput", 13009); // what 2026-02-17 actually reached
+  victron(mod, "inverterOutput", 13009); // just over the limit
   assert.deepStrictEqual(switchCommands(published), [false, false, false]);
 });
 
@@ -136,8 +122,7 @@ test("a stage already off is not commanded off again", () => {
 test("an overload does not wait for initialisation", () => {
   const { mod, published } = loadController();
   mod.state.mqttConnected = true;
-  // A restart under load: the stages have said they are on, and the controller is
-  // still waiting on the third one before it will control anything.
+  // Two stages reported on, the third not yet
   mod.state.remoteSwitches[0].on = true;
   mod.state.remoteSwitches[0].statusReceived = true;
   mod.state.remoteSwitches[1].on = true;
@@ -163,15 +148,7 @@ test("a stage that has not reported is not commanded even in an emergency", () =
 });
 
 // ===== The 12 kW inverter contribution limit =====
-//
-// High SOC used to enable every stage unconditionally, which is fine on an idle
-// inverter and an overload on a working one: 2025-12-23 20:32, dumps switched on
-// top of 7 kW of house load. What replaced it budgets the dumps against what the
-// inverter is already contributing, so the answer falls as the house load rises.
-//
-// The subtraction that makes it work is baseLoad = acConsumption - dumpPower. The
-// dumps are inside acConsumption, so counting them would have the controller
-// budget against its own output and walk itself down to nothing.
+// Dumps are budgeted against baseLoad = acConsumption - dumpPower.
 
 test("the dumps' own draw is not counted against the limit", () => {
   const { mod } = loadController();
@@ -185,7 +162,7 @@ test("the dumps' own draw is not counted against the limit", () => {
 
 test("high SOC does not dump on top of a loaded inverter", () => {
   const { mod } = loadController();
-  mod.state.acConsumption = 7000;   // the 2025-12-23 house load, dumps not yet on
+  mod.state.acConsumption = 7000;   // house load, dumps not yet on
   mod.state.solarPower = 0;
   mod.state.intendedDumpPower = 0;
 
@@ -225,9 +202,7 @@ test("DC-coupled hydro does count, because it reaches the house through the inve
   const withoutHydro = mod.calculateMaxDumpPower(false);
   mod.state.dcHydroPower = 3000;
 
-  // The asymmetry is deliberate and is the one thing here that looks like a bug:
-  // surplus counts DC hydro as generation, the inverter limit does not count it as
-  // relief, because every watt of it is carried by the inverter it is limiting.
+  // DC hydro is generation for surplus but passes through the inverter
   assert.strictEqual(mod.calculateMaxDumpPower(false), withoutHydro);
   assert.strictEqual(mod.calculateAvailablePower(false),
     3000 - 7000 - mod.config.dumpLoad.batteryHeadroom);
@@ -246,17 +221,7 @@ test("the actual draw is read when observing, the intended when controlling", ()
 });
 
 // ===== The two headroom reserves =====
-//
-// Surplus is not spent down to zero. 200 W stays back for the parasitic loads the
-// Cerbo and the BMS draw, and for a trickle into the battery - it replaced a
-// hysteresis band, and it is what stops the dumps holding the battery a percent
-// below full all afternoon.
-//
-// The EVSE gets the reserve instead when it is charging in auto, because it is
-// running its own surplus control off the same measurement. Two controllers
-// bidding for the same watts oscillate, so this one leaves the charger its next
-// step - 2 A at 230 V - and stops reserving for the battery, since the EVSE's
-// ampere steps leave crumbs this can absorb.
+// 200 W battery reserve, or 2 A of EVSE headroom instead when it charges in auto.
 
 test("battery headroom is held back from the surplus", () => {
   const { mod } = loadController();
@@ -382,25 +347,14 @@ test("an SOC never heard from tracks surplus rather than suppressing", () => {
 
   const log = captureLog(() => mod.checkSystemState());
 
-  // The low-SOC term is written to ignore 0 for exactly this reason. Surplus
-  // control needs no SOC to be safe - it spends generation that exists - so an
-  // unheard SOC falls to the bottom rung rather than holding every stage off.
+  // SOC 0 means not yet received, and is ignored
   assert.ok(log.indexOf("Monitoring") !== -1, log);
 });
 
 // ===== The minimum change time, and what outranks it =====
-//
-// Ten minutes between changes, because a stage sitting on the threshold otherwise
-// flutters: relay wear, and a measurement that never settles long enough to budget
-// against. The cost is that the allocator has to account for a stage it cannot
-// move, and the order it does that in is stalled, then locked, then free.
-//
-// Stalled has to come first. A stage at thermal cutout is drawing nothing, so
-// charging it nominal power reserves 2.69 kW that is not being used and holds the
-// stage below it off - which is the regression that put this ordering in.
+// Allocation order: stalled, then locked, then free.
 
-// Milliseconds ago, as a lastChangeUptime. Negative where the run is younger than the
-// interval asked for, which the arithmetic takes in its stride.
+// A lastChangeUptime ms ago
 function changedAgo(mod, ms) {
   return mod.state.nowUptime - ms;
 }
@@ -424,8 +378,6 @@ test("a locked ON stage rides out a surplus that has fallen below it", () => {
   mod.state.remoteSwitches[0].on = true;
   mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
-  // 200 W of surplus against a 2.69 kW stage: unlocked it would go off, and back on
-  // as soon as a cloud passed. This is the flutter the lock exists to stop.
   assert.deepStrictEqual(mod.calculateDesiredState(200).switches, [true, false, false]);
 });
 
@@ -443,13 +395,7 @@ test("a surplus below the floor sheds a locked stage anyway", () => {
   mod.state.remoteSwitches[0].on = true;
   mod.state.remoteSwitches[0].lastChangeUptime = changedAgo(mod, 60 * 1000);
 
-  // The minSurplus floor returns before the lock is consulted, so the lock holds a
-  // stage against a thin surplus but not against no surplus. That is the right way
-  // round - available already has the dumps' own draw added back, so falling under
-  // 100 W means generation has dropped a full stage below what is running, and
-  // that is the battery discharging rather than a threshold being grazed - but it
-  // is the opposite of what the change that added the lock described, so it is
-  // asserted here rather than left to be rediscovered.
+  // minSurplus is checked before the lock
   assert.deepStrictEqual(mod.calculateDesiredState(50).switches, [false, false, false]);
 });
 
@@ -511,9 +457,7 @@ test("a stage that has just changed is not read as stalled", () => {
   stage.power = 0;                          // the meter has not caught up yet
   stage.lastChangeUptime = changedAgo(mod, 10 * 1000);
 
-  // Measurement lags the command, so a stage switched on ten seconds ago looks
-  // exactly like one at cutout. Treating it as stalled would give its power away
-  // and then find it drawing 2.69 kW as well.
+  // Within the grace period, so not stalled
   assert.deepStrictEqual(mod.calculateDesiredState(2 * HEATER).switches,
     [true, true, false]);
   assert.strictEqual(mod.calculateDesiredState(2 * HEATER).intendedPower, 2 * HEATER);
@@ -625,8 +569,6 @@ test("every matched Victron path is still covered by a subscription", () => {
 });
 
 // ===== Initialisation =====
-// Shelly publishes switch status on change and does not retain it, so a stage
-// that has not switched recently may stay silent for a long time.
 
 test("initialisation waits for all three stages to report", () => {
   const { mod } = loadController();
@@ -656,15 +598,9 @@ test("a silent stage does not gate the others forever", () => {
     "must control once the bounded wait expires");
 });
 
-// Waiting is only half of it. The other half is what the wait was for: every
-// calculation here is written in terms of intendedDumpPower, and a script that has
-// just started intends nothing. So a restart under 8 kW of running stages used to
-// read the house as 8 kW heavier than it was, shed the lot, and then hold them off
-// for the ten minutes of the change lock - which is how a redeploy on a sunny
-// afternoon turned into an evening of cold water.
+// A restart seeds intendedDumpPower from the stages' reported draw.
 
-// Every stage reporting itself on and drawing its nominal power, as a redeploy
-// finds them.
+// Every stage reporting on at nominal power
 function stagesRunning(mod) {
   mod.config.remoteSwitches.switches.forEach((sw) => {
     mod.processMqttMessage(sw.deviceId + "/status/switch:" + sw.switchId,
@@ -687,9 +623,7 @@ test("a restart adopts the loads it found running rather than shedding them", ()
     "the first pass after a restart must command nothing it does not have a reason for");
 });
 
-// The seed is only observable as it happens: the control pass that follows it in
-// the same call writes intendedDumpPower again with whatever it decided. So the
-// console line is what a test can hold on to.
+// The control pass overwrites intendedDumpPower, so assert on the console line
 test("the seed is what the stages report drawing, not what the table says they draw", () => {
   const { mod } = loadController();
   mod.state.mqttConnected = true;
@@ -737,12 +671,7 @@ test("a broker reconnect re-arms the bounded wait", () => {
 
 // ===== Seeding the VE.Bus state =====
 
-// The broker publishes nothing until a value changes, and this one changes only when a
-// generator runs - months apart - so it is only ever seen in the burst a republish
-// produces. Everything else in the topic set changes every few seconds and arrives
-// regardless, which is what makes the miss invisible: measured on the live broker over 70
-// seconds, `vebus/276/State` did not arrive once. Miss it and Priority 1 suppresses every
-// stage until the next generator run.
+// Victron publishes only on change, so VE.Bus state arrives only in a republish.
 const PORTAL = "c0847dc9a794";
 const INVERTING = 9;
 
@@ -799,10 +728,6 @@ test("a broker drop makes the VE.Bus state unknown again", () => {
 
 // ===== Asking the stages to report =====
 
-// A PM channel cannot stay quiet for long - measured on the live broker, an immersion at
-// thermal cutout republished its switch status every 20-30 seconds without switching - but
-// a stage that is off may say nothing at all, and until every stage has reported this
-// controller touches none of them.
 function statusUpdates(published) {
   return published.filter((p) => p.payload === "status_update").map((p) => p.topic);
 }
@@ -867,8 +792,6 @@ test("the controller keeps asking until every stage answers", () => {
     "once answered, stop asking every device to republish every 30 seconds");
 });
 
-// A stage may have been switched by hand while the broker was away, and nothing will
-// repeat it: the reading afterwards is unknown, not merely old.
 test("a reconnect asks every device again", () => {
   const { mod, published, timers } = loadController();
   mod.handleMqttConnected();
@@ -887,9 +810,7 @@ test("a reconnect asks every device again", () => {
 
 // ===== The device's own MQTT config =====
 
-// Connected is the ordinary case: the device's MQTT client is up long before the script
-// starts, so a check that only ran when offline would never run at all - which is where
-// this one used to sit.
+// MQTT is already connected when the script starts
 function connectedWith(mqttConfig) {
   global.Shelly.getComponentStatus = function () { return { connected: true }; };
   global.Shelly.getComponentConfig = function () { return mqttConfig; };
@@ -899,8 +820,7 @@ function serverFor(mod) {
   return mod.config.cerbo.host + ":" + mod.config.cerbo.port;
 }
 
-// This device's own light:0 is buffer immersion 3, and the thermal dump controller watches
-// its published status for a cutout it has no other way of seeing.
+// thermal-dump-controller.js watches this device's light:0 status
 test("status notifications are turned on if the device has them off", () => {
   const { mod, calls } = loadController();
   connectedWith({ enable: true, server: serverFor(mod), status_ntf: false });
@@ -961,14 +881,10 @@ test("the status line tells an unheard VE.Bus state from Off", () => {
 });
 
 // ===== The clock jumping =====
-//
 // Every interval within the run is measured against uptime. See docs/adr/0003.
 
 test("a stage this run never commanded is judged on what it reports", () => {
-  // Under the wall clock `Date.now() - 0` was enormous, so a never-commanded stage skipped
-  // the settling grace and was read as stalled straight away - which is what the call site
-  // wanted. Uptime inverts a zero stamp into "just now", so the sentinel is null and
-  // isLoadStalled tests for it. isLoadLocked below it always did.
+  // lastChangeUptime null means never commanded, so no grace period
   const { mod } = loadController();
   const stage = mod.state.remoteSwitches[0];
   stage.on = true;
@@ -981,8 +897,7 @@ test("a stage this run never commanded is judged on what it reports", () => {
 });
 
 test("NTP landing does not end a stage's settling grace", () => {
-  // Through refreshUptime, which is what a pass does before judging: isLoadStalled consults
-  // no clock of its own, so asserting on it alone would pass with or without the bug.
+  // Through refreshUptime, since isLoadStalled reads no clock itself
   const { mod } = loadController();
   const stage = mod.state.remoteSwitches[0];
   stage.on = true;

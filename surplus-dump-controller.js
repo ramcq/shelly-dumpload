@@ -20,10 +20,7 @@ let config = {
     portalId: "c0847dc9a794" // VRM portal ID
   },
 
-  // Remote dump load switches, in allocation order. Each entry carries its own device,
-  // so the constant stages need not share a Shelly: immersions 1 and 2 are the two
-  // channels of the Pro 2PM, immersion 4 is a Pro 1PM of its own. switchId is the
-  // channel on that device and is not the position in this list.
+  // Remote dump load switches, in allocation order. switchId is the channel on deviceId.
   remoteSwitches: {
     switches: [
       { deviceId: "shellypro2pm-ec6260a03d70", switchId: 0, name: "Buffer Immersion 1" },
@@ -45,12 +42,8 @@ let config = {
     inverterOutput: "vebus/276/Ac/Out/L1/P"       // VE.Bus inverter output power (W)
   },
 
-  // What we actually subscribe to. A Shelly script may hold ten MQTT subscriptions and
-  // no more — exceeding it throws "Too many subscriptions" and the script does not run —
-  // so the three evcharger paths above are taken as one subtree instead of three
-  // subscriptions. Messages are still matched against the exact paths in config.victron,
-  // so the extra topics the subtree delivers are read and ignored.
-  // Seven here, plus one per remote switch device, leaves one spare.
+  // Topics subscribed to; evcharger is one wildcard to stay within the ten-subscription
+  // limit. See README.md#mqtt-subscription-budget.
   victronSubscriptions: [
     "system/0/Ac/PvOnOutput/L1/Power",
     "dcsource/279/Dc/0/Power",
@@ -85,16 +78,10 @@ let config = {
   // Timing settings
   checkInterval: 5 * 1000,    // 5 seconds in milliseconds
 
-  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
-  // main loop, so a republish asked for in the same breath is answered before anything is
-  // listening. The length hardly matters - a millisecond would do - only that it lands on
-  // a later turn of the loop.
+  // MQTT.subscribe only takes effect after returning to the main loop
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
 
-  // How long to wait for every remote stage to report its status before controlling
-  // anyway. Every stage is asked to republish on connect, so this is the floor under a
-  // lost request rather than the way status normally arrives.
-  statusSeedTimeout: 90 * 1000,
+  statusSeedTimeout: 90 * 1000, // ms - max wait for every remote stage's status
 
   // Virtual component IDs (minimal to avoid MQTT spam)
   virtualComponents: {
@@ -134,14 +121,9 @@ let state = {
   // Remote switch states, built below from config.remoteSwitches.switches
   remoteSwitches: [],
 
-  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
-  // below the state literal.
-  nowUptime: null,           // Uptime at the start of this pass, or null
-                             // while the clock has never been read
+  nowUptime: null,           // ms of uptime at the start of this pass, null until read
 
-  // Uptime when the first control pass ran without every stage having reported, or null for
-  // no such pass
-  firstIncompleteCheckUptime: null,
+  firstIncompleteCheckUptime: null, // Uptime of the first pass missing a stage's status
 
   // Local dimmer state
   localDimmer: {
@@ -159,8 +141,7 @@ let state = {
   timerId: null
 };
 
-// One state entry per configured stage, so the two lists cannot drift apart: every
-// place that walks one of them indexes the other by the same position.
+// One state entry per configured stage, same index
 for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
   state.remoteSwitches.push({
     on: false,
@@ -172,10 +153,7 @@ for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
 }
 
 // ===== Elapsed time =====
-//
-// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
-// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
-// entry points the device calls; an unreadable `sys` leaves the last value standing.
+// Intervals are measured in uptime, not Date.now(). See docs/adr/0003.
 function refreshUptime() {
   let sys = Shelly.getComponentStatus("sys");
 
@@ -258,9 +236,7 @@ function updateStatus(event) {
   let dcHydroPart = state.dcHydroPower > 0 ? " DC Hydro:" + state.dcHydroPower.toFixed(0) + "W" : "";
   let availPart = " Avail:" + state.availablePower.toFixed(0) + "W";
 
-  // "?" is not "Off": both suppress every stage, but one is the inverter and the other is
-  // this controller never having been told, which would otherwise be diagnosed as a fault
-  // on the inverter.
+  // "?" until the VE.Bus state has been received
   let vePart = " VE:" +
     (state.vebusReceived ? getVebusStateString(state.vebusState) : "?");
 
@@ -399,16 +375,13 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  // The overload fast path commands stages from here, stamping their change times, so
-  // a message takes its own reading rather than the last poll's.
+  // The overload fast path commands stages from here
   refreshUptime();
 
   try {
     let payload = JSON.parse(message);
 
-    // Check if this is a remote switch status message. The device wildcards also
-    // deliver input, sys and wifi topics, so match the exact switch topic per stage
-    // rather than a prefix.
+    // Remote switch status: match the exact topic, the device wildcard delivers others too
     for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
       let sw = config.remoteSwitches.switches[i];
 
@@ -490,8 +463,6 @@ function processMqttMessage(topic, message) {
       state.vebusState = parseInt(payload.value);
       logDebug("VE.Bus state updated: " + state.vebusState + " (" + getVebusStateString(state.vebusState) + ")");
 
-      // Worth a console line rather than a debug one: until this arrives every stage is
-      // suppressed, so this is the moment the controller becomes able to dump at all.
       if (!state.vebusReceived) {
         state.vebusReceived = true;
         console.log("VE.Bus state received: " + getVebusStateString(state.vebusState));
@@ -502,10 +473,7 @@ function processMqttMessage(topic, message) {
     if (relativeTopic === config.victron.inverterOutput) {
       state.inverterOutput = parseFloat(payload.value);
 
-      // Shedding needs no seeding: a stage that has reported itself on is one this can
-      // turn off, and a stage that has not reported is one no path could shed anyway. The
-      // seeding this used to wait for is what stops an uninformed controller *enabling*,
-      // and nothing here enables.
+      // Runs before every stage has reported: shedding needs no status
       if (state.inverterOutput > config.dumpLoad.emergencyInverterLimit) {
         logDebug("EMERGENCY: Inverter output " + state.inverterOutput.toFixed(0) +
                 "W exceeds " + config.dumpLoad.emergencyInverterLimit + "W limit - suppressing all loads");
@@ -543,9 +511,7 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + topic);
   }
 
-  // Subscribe to remote switch topics using one wildcard per device, so stages sharing
-  // a device (immersions 1 and 2) still cost a single subscription. Subscriptions are a
-  // scarce resource on Shelly, so de-duplicate rather than subscribing per stage.
+  // Subscribe to remote switch topics, one wildcard per device
   let subscribedDevices = [];
   for (let i = 0; i < config.remoteSwitches.switches.length; i++) {
     let deviceId = config.remoteSwitches.switches[i].deviceId;
@@ -560,21 +526,14 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + switchTopic);
   }
 
-  // Ask for a full republish, but from a later turn of the main loop than the subscriptions
-  // above - see config.initialKeepaliveDelay.
+  // Ask for a full republish once the subscriptions are live
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
     requestRemoteStatus();
   });
 
-  // Setup periodic keepalive (every 30 seconds).
-  //
-  // Keep asking for a republish until the VE.Bus state has actually been seen, in case the
-  // yield above was not enough. The broker publishes nothing until a value changes, and
-  // this one changes only when a generator runs - months apart - so it is only ever seen in
-  // a republish. Everything else in the topic set changes every few seconds and so arrives
-  // regardless, which is what makes the miss invisible: the one path the Priority 1 gate
-  // rests on is the one that fails to arrive.
+  // Periodic keepalive (every 30 seconds). Victron publishes only on change, so keep
+  // asking for a republish until the VE.Bus state has been received.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
@@ -584,21 +543,8 @@ function setupMqttSubscriptionsAndKeepalive() {
   });
 }
 
-// Shelly publishes status on change and does not retain it, so nothing arrives from a stage
-// that has not moved since this script started. A PM channel cannot stay quiet for long -
-// its power, voltage and energy readings drift, and one republishes every 20-30 seconds
-// whether or not it has switched - but a stage that is off may say nothing at all, and until
-// every stage has reported, this controller will not touch any of them.
-//
-// So ask, rather than wait it out: `status_update` on a device's command topic makes it
-// republish every component on `<prefix>/status/…`, which the wildcard subscription above
-// already covers. No extra subscription, no HTTP, no reply topic, and it needs only
-// `enable_control`, which is on by default. Same shape as the keepalive, and for the same
-// reason: ask on connect, then keep asking until the answer arrives, since the request is
-// as losable as the answer.
-//
-// One ask per device, not per stage: immersions 1 and 2 share a Pro 2PM, and one republish
-// carries both channels.
+// Ask each device with an unreported stage to republish its status. `status_update` on the
+// command topic makes a Shelly republish every component. See README.md#seeding-state-from-other-devices.
 function requestRemoteStatus() {
   let asked = [];
 
@@ -659,7 +605,7 @@ function resetMqttData() {
     state.remoteSwitches[i].statusReceived = false;
   }
 
-  // Re-arm the bounded wait, so a reconnect cannot leave us gated on a silent stage
+  // Restart the status wait
   state.firstIncompleteCheckUptime = null;
 
   logDebug("Reset MQTT data due to disconnection");
@@ -683,10 +629,8 @@ function ensureMqttConfig() {
     needsConfig = true;
     logDebug("MQTT server doesn't match, reconfiguring");
   } else if (mqttConfig.status_ntf === false) {
-    // This device's own light:0 is buffer immersion 3, and thermal-dump-controller.js
-    // watches its published status for the cutout it cannot otherwise see. Status
-    // notifications off means a stage that boils with nothing to recover it. Tested for
-    // false, not for not-true: a firmware without the key must not reboot on every start.
+    // thermal-dump-controller.js needs light:0 status published. Firmware without the key
+    // reads undefined and must not reboot.
     needsConfig = true;
     logDebug("MQTT status notifications are off, reconfiguring");
   }
@@ -715,9 +659,7 @@ function ensureMqttConfig() {
 }
 
 function connectMqtt() {
-  // Handlers and config first, unconditionally: the device's MQTT client is usually
-  // connected before this script starts, and the config check used to sit behind that
-  // early return, where it never ran at all.
+  // Handlers and config first: MQTT is usually already connected at script start
   MQTT.setConnectHandler(handleMqttConnected);
 
   MQTT.setDisconnectHandler(function() {
@@ -778,8 +720,7 @@ function updateLocalDimmerState() {
 }
 
 // ===== Remote device control via MQTT RPC =====
-// index is the position in config.remoteSwitches.switches; the channel actually
-// commanded is that entry's switchId, on that entry's own device.
+// index is the position in config.remoteSwitches.switches
 function sendRemoteSwitchCommand(index, turnOn, reason) {
   if (!state.mqttConnected) {
     logDebug("Cannot send RPC command: MQTT not connected");
@@ -838,9 +779,7 @@ function isLoadStalled(load, lastChangeUptime) {
   const gracePeriod = 30000; // ms - don't check stalls on recently changed loads
 
   // Grace period: measurements lag behind commands, so newly-changed loads
-  // appear stalled before power readings arrive. Wait for stable state. A load this run has
-  // never commanded has no such lag to wait out - what it reports is what it was doing
-  // before the script started.
+  // appear stalled before power readings arrive. Wait for stable state.
   if (lastChangeUptime !== null &&
       state.nowUptime - lastChangeUptime < gracePeriod) {
     return false;
@@ -1097,8 +1036,6 @@ function applyDesiredState(desired, reason) {
 }
 
 function checkSystemState() {
-  // Every entry into the control logic takes its own reading of the clock, because the MQTT
-  // fast path reaches this directly as well as the poll does.
   refreshUptime();
 
   // INITIALIZATION: Wait for all switch statuses, then initialize intended power
@@ -1113,12 +1050,7 @@ function checkSystemState() {
     }
 
     if (!allSwitchStatusReceived) {
-      // Every stage is asked to republish on connect, and an energised one announces
-      // itself within half a minute regardless, so what is left here is a lost request to
-      // a stage that is off and therefore silent. Waiting indefinitely on it would let one
-      // idle stage hold every other load off, so bound the wait and then treat the silent
-      // stages as off. Commanding a stage that is already in the desired position is a
-      // no-op, so guessing wrong is cheap.
+      // After statusSeedTimeout, treat stages that have not reported as off
       if (state.firstIncompleteCheckUptime === null) {
         state.firstIncompleteCheckUptime = state.nowUptime;
       }
@@ -1146,8 +1078,7 @@ function checkSystemState() {
   // Only allow dumps when inverter is in Inverting mode (state 9)
   // Covers: Off, Fault, Passthru (generator), Power Assist, Bulk/Absorption/Float (charging)
   if (state.vebusState !== 9) {
-    // Not yet heard from suppresses exactly as Off does, but says so differently: the
-    // republish retry above is what ends that, and it is not an inverter fault.
+    // "Unknown" until the VE.Bus state has been received
     let veName = state.vebusReceived ? getVebusStateString(state.vebusState) : "Unknown";
     logDebug("VE.Bus not inverting (" + veName + "), suppressing all dump loads");
     suppressAllLoads("VE.Bus " + veName);

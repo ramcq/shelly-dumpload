@@ -16,11 +16,8 @@ let config = {
     portalId: "c0847dc9a794" // VRM portal ID
   },
 
-  // The buffer immersions, one entry per stage that surplus-dump-controller.js can switch.
-  // Each is watched for output ON + voltage present + no consumption, which is the thermal
-  // cutout having opened. When ANY of them is cut out, the thermal dump can operate.
-  // Keep this list in step with the stages in surplus-dump-controller.js: an immersion that
-  // can be switched but is not listed here cuts out with nothing to recover it.
+  // Buffer immersions watched for thermal cutout (output ON + voltage + no consumption).
+  // Keep in step with the stages in surplus-dump-controller.js. See CONTROLS.md#dump-loads-together
   dumpLoads: [
     // Shelly Pro 2PM (ec6260a03d70) - 2 switches
     {
@@ -57,9 +54,8 @@ let config = {
     bottomTankTemp: "temperature/101/Temperature",   // Bottom tank temperature sensor
     boilerOperating: "digitalinput/102/State",       // Boiler digital input (10=running, 11=stopped)
 
-    // The bridge holds its last values when modbus drops, so they keep arriving and keep
-    // looking fresh; this is the only thing that says otherwise. One path for all three,
-    // since its services fail together.
+    // dbus-froeling keeps its last values and sets /Connected to 0 when Modbus drops.
+    // One path covers all three readings. See CONTROLS.md#when-the-fröling-bridge-falls-over
     froelingConnected: "temperature/100/Connected"
   },
 
@@ -67,10 +63,7 @@ let config = {
   checkInterval: 10 * 1000,  // 10 seconds in milliseconds
   minRunTime: 5 * 60 * 1000, // 5 minutes minimum run time
 
-  // A yield, not a wait: MQTT.subscribe is only acted on once the script returns to the
-  // main loop, so a republish asked for in the same breath is answered before anything is
-  // listening. The length hardly matters - a millisecond would do - only that it lands on
-  // a later turn of the loop.
+  // MQTT.subscribe only takes effect after returning to the main loop.
   initialKeepaliveDelay: 1000,  // ms - after subscribing, before asking for a republish
 
   // Virtual component IDs (minimal set)
@@ -121,29 +114,23 @@ let state = {
   bottomTankTemp: 0,
   boilerOperating: false,
   boilerReceived: false,     // Whether that was published rather than assumed
-  bridgeConnected: true,     // Whether the Fröling bridge can read the boiler. Absent, this
-  bridgeConnectedReceived: false,  // is no claim either way
+  bridgeConnected: true,     // Whether the Fröling bridge can read the boiler
+  bridgeConnectedReceived: false,
 
-  // Elapsed time within this run, in ms of uptime rather than wall clock. See the section
-  // below the state literal.
-  nowUptime: null,           // Uptime at the start of this pass, or null
-                             // while the clock has never been read
+  nowUptime: null,           // ms of uptime at the start of this pass, or null until read
 
   // Timer
   timerId: null
 };
 
-// One state entry per watched load, built here rather than during setup so the array
-// exists before any status message can arrive and cannot drift from the config.
+// One state entry per watched load
 for (let i = 0; i < config.dumpLoads.length; i++) {
   state.dumpLoads.push({ output: false, voltage: 0, power: 0 });
 }
 
 // ===== Elapsed time =====
-//
-// Intervals within one run are measured against uptime, never Date.now(): a pre-NTP stamp
-// compared after the sync reads as days. See docs/adr/0003. Read once per pass, at the
-// entry points the device calls; an unreadable `sys` leaves the last value standing.
+// Intervals use uptime, not Date.now(), which jumps at NTP sync. See docs/adr/0003.
+// Refreshed at each entry point; an unreadable `sys` keeps the last value.
 function refreshUptime() {
   let sys = Shelly.getComponentStatus("sys");
 
@@ -190,12 +177,12 @@ function isLoadStalled(load) {
          load.power <= config.thresholds.maxConsumption;
 }
 
-// Check if any dump load is stalled
-// Never having heard is no claim either way.
+// True only once the bridge has reported it cannot read the boiler
 function bridgeIsDown() {
   return state.bridgeConnectedReceived && !state.bridgeConnected;
 }
 
+// Check if any dump load is stalled
 function isDumpLoadStalled() {
   for (let i = 0; i < state.dumpLoads.length; i++) {
     if (isLoadStalled(state.dumpLoads[i])) {
@@ -234,15 +221,13 @@ function updateStatus(event) {
   let fanPart = " Fan:" + (getOutput(OUTPUT_FAN_COIL).on ? "ON" : "OFF");
   let pumpPart = " Pump:" + (getOutput(OUTPUT_PUMP).on ? "ON" : "OFF");
 
-  // A held value is shown as no reading, because that is what it is.
   let tankUnreadable = bridgeIsDown();
   let tempDelta = state.topTankTemp - state.bottomTankTemp;
   let tempPart = tankUnreadable
     ? " Tank:?"
     : " Tank:" + state.topTankTemp.toFixed(1) + "/" + state.bottomTankTemp.toFixed(1) + "°C";
   let deltaPart = tankUnreadable ? "" : " Δ" + tempDelta.toFixed(1);
-  // "?" is not "OFF": one permits dumping and the other inhibits it, and the status text is
-  // the only instrument on a device that keeps no log across a restart.
+  // "?" = not yet heard, which inhibits dumping
   let boilerPart = " Boiler:" +
     (tankUnreadable ? "unreadable"
       : (!state.boilerReceived ? "?" : (state.boilerOperating ? "ON" : "OFF")));
@@ -338,7 +323,6 @@ function setupEventHandlers() {
     if (!event || !event.name || !event.info || !event.info.event)
       return;
 
-    // An output moving stamps its start, so the handler takes its own reading.
     refreshUptime();
 
     if (event.info.event == "power_measurement" ||
@@ -432,7 +416,6 @@ function processMqttMessage(topic, message) {
     return;
   }
 
-  // A stalled peer starts the pump from here, so a message takes its own reading.
   refreshUptime();
 
   try {
@@ -476,8 +459,7 @@ function processMqttMessage(topic, message) {
       state.bottomTankTemp = parseFloat(payload.value);
     }
 
-    // Read at the point of use, never acted on here: the bridge keeps publishing its held
-    // values, so a controller that forgot them would take the next republish for readings.
+    // Fröling bridge connection, checked through bridgeIsDown()
     if (relativeTopic === config.topics.froelingConnected) {
       let wasConnected = state.bridgeConnected;
       let wasKnown = state.bridgeConnectedReceived;
@@ -497,8 +479,7 @@ function processMqttMessage(topic, message) {
       state.boilerOperating = (payload.value === 10);
       logDebug("Boiler operating updated: " + state.boilerOperating + " (state=" + payload.value + ")");
 
-      // Worth a console line rather than a debug one: until this arrives the thermal dump
-      // is inhibited, so this is the moment it becomes able to run at all.
+      // Dumping is inhibited until the first boiler state arrives
       if (!state.boilerReceived) {
         state.boilerReceived = true;
         console.log("Boiler state received: " +
@@ -527,20 +508,13 @@ function setupMqttSubscriptionsAndKeepalive() {
     logDebug("Subscribed to: " + config.dumpLoads[i].statusTopic);
   }
 
-  // Ask for a full republish, but from a later turn of the main loop than the
-  // subscriptions above - see config.initialKeepaliveDelay.
+  // Ask for a full republish on a later turn of the main loop
   Timer.set(config.initialKeepaliveDelay, false, function() {
     sendKeepalive(false);
   });
 
-  // Setup periodic keepalive (every 30 seconds).
-  //
-  // Keep asking for a republish until the boiler state has actually been seen, in case the
-  // yield above was not enough. The broker publishes nothing until a value changes, and the
-  // boiler input moves only when the boiler starts or stops firing - several times a day
-  // while it is lit, and not at all through a spell with power to spare - so between
-  // transitions it is only ever seen in a republish. The tank temperatures drift constantly
-  // and so arrive regardless.
+  // Setup periodic keepalive (every 30 seconds). Victron publishes only on change, so
+  // keep asking for a republish until the boiler and bridge states have been seen.
   if (state.keepaliveTimer) {
     Timer.clear(state.keepaliveTimer);
   }
@@ -608,10 +582,8 @@ function ensureMqttConfig() {
     needsConfig = true;
     logDebug("MQTT server doesn't match, reconfiguring");
   } else if (mqttConfig.status_ntf === false) {
-    // Nothing follows this device, but the same setting carries its own two channels and
-    // its status text, which is the only account of what the thermal dump did that can be
-    // read from anywhere but the plant room. Tested for false, not for not-true: a
-    // firmware without the key must not reboot on every start.
+    // Publishes this device's outputs and status text. Tested for false so a firmware
+    // without the key does not reboot on every start.
     needsConfig = true;
     logDebug("MQTT status notifications are off, reconfiguring");
   }
@@ -640,9 +612,7 @@ function ensureMqttConfig() {
 }
 
 function connectMqtt() {
-  // Handlers and config first, unconditionally: the device's MQTT client is usually
-  // connected before this script starts, and the config check used to sit behind that
-  // early return, where it never ran at all.
+  // Handlers and config first: MQTT is usually already connected when the script starts
   MQTT.setConnectHandler(handleMqttConnected);
 
   MQTT.setDisconnectHandler(function() {
@@ -739,8 +709,7 @@ function turnOutputOn(outputId, reason) {
 function turnOutputOff(outputId, reason) {
   let output = getOutput(outputId);
 
-  // Check minimum run time. An output this run never started has none to wait out - what
-  // it was doing before the script started is not this run's decision to undo.
+  // Check minimum run time. An output this run never started has none to wait out.
   if (output.onTimeUptime !== null) {
     let timeElapsed = state.nowUptime - output.onTimeUptime;
 
@@ -773,8 +742,6 @@ function turnOutputOff(outputId, reason) {
 }
 
 function checkSystemState() {
-  // Every entry into the control logic takes its own reading of the clock, because the
-  // MQTT and event handlers reach this directly as well as the poll does.
   refreshUptime();
 
   updateStatus("Monitoring");
@@ -794,12 +761,7 @@ function checkSystemState() {
     return; // Skip other checks
   }
 
-  // PRIORITY 2: Stop if the boiler is operating, or if we do not know whether it is.
-  //
-  // Dumping heat is a power system optimisation, and it is only worth doing while the
-  // heating side is known not to want that heat. An unheard boiler state therefore counts
-  // as a running one: the state arrives seconds after connecting, and burning wood to feed
-  // a fan coil is the one outcome worth a few seconds of inhibition to avoid.
+  // PRIORITY 2: Stop if the boiler is operating, not yet heard, or unreadable
   if (state.boilerOperating || !state.boilerReceived || bridgeIsDown()) {
     let reason = bridgeIsDown()
       ? "Boiler Unreadable"

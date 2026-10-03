@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 Robert McQueen
 //
-// Covers thermal cutout detection across the buffer immersions: every stage the
-// surplus controller can switch must be watched here, or it cuts out with nothing
-// to recover it. Run with: node --test tests/
+// Thermal dump controller tests. Run with: node --test tests/
 
 const test = require("node:test");
 const assert = require("node:assert");
@@ -42,8 +40,6 @@ test("watched topics are unique", () => {
   assert.strictEqual(new Set(topics).size, topics.length);
 });
 
-// This is the coupling that silently rots: a stage can be added to the surplus
-// controller and switched on live plant without anything here noticing it.
 test("every switchable surplus stage is watched for cutout", () => {
   const { mod: thermal } = loadThermal();
   const { mod: surplus } = load(SURPLUS);
@@ -93,8 +89,7 @@ test("a cutout on immersion 4 is seen while the others are heating", () => {
       JSON.stringify(l.statusTopic === IMMERSION_4 ? STALLED : HEATING));
   });
 
-  // STALLED must win over the others still drawing power, or the fan coil
-  // never runs and the cut-out immersion never recovers.
+  // STALLED wins over loads still heating
   assert.strictEqual(mod.getDumpLoadState(), "STALLED");
 });
 
@@ -132,13 +127,7 @@ test("every watched load is subscribed to", () => {
 
 // ===== Seeding the boiler state =====
 
-// The boiler input moves only when the boiler starts or stops firing, and the Victron
-// broker publishes nothing until a value changes, so a controller starting up between
-// transitions hears nothing at all: measured over 70 seconds on the live broker, with
-// power to spare and the boiler cold, the tank temperatures arrived four times each and
-// `digitalinput/102/State` never. It is therefore only ever seen in the burst a republish
-// produces - the one this controller used to ask for in the same breath as its own
-// subscriptions.
+// Victron publishes only on change, so the boiler state usually arrives only in a republish.
 const PORTAL = "c0847dc9a794";
 const BOILER_RUNNING = 10;
 const BOILER_STOPPED = 11;
@@ -148,8 +137,7 @@ function victron(mod, key, value) {
     JSON.stringify({ value: value }));
 }
 
-// Hot buffer, one immersion at cutout: everything the thermal dump needs except an answer
-// about the boiler.
+// Hot buffer, one immersion at cutout, boiler state not yet heard
 function readyToDump(mod) {
   victron(mod, "topTankTemp", 80);
   victron(mod, "bottomTankTemp", 78);
@@ -203,15 +191,12 @@ test("keepalives keep asking for a republish until the silent readings are seen"
 
 // ===== The bridge behind every Fröling reading =====
 
-// dbus-froeling holds the last temperature and the last boiler state when modbus drops, so
-// both keep arriving and keep looking fresh. Recovering waste heat is a power system
-// optimisation, so losing sight of the boiler suppresses it rather than degrading it.
+// dbus-froeling keeps its last values and sets /Connected to 0 when Modbus drops.
 function bridge(mod, connected) {
   victron(mod, "froelingConnected", connected ? 1 : 0);
 }
 
-// Which outputs were commanded on. switchCommands() here yields {id, on} params rather than
-// bare booleans, so a test that reaches for a boolean in it never matches anything.
+// Ids of the outputs commanded on
 function turnedOn(calls) {
   return switchCommands(calls).filter((p) => p.on).map((p) => p.id).sort();
 }
@@ -233,16 +218,13 @@ test("a bridge that cannot read the boiler suspends the thermal dump", () => {
 });
 
 test("a republish burst does not revive a held reading", () => {
-  // The bridge holds its last values, so a full republish re-delivers all of them looking
-  // exactly as they did when they were live. Suppression has to be a property of the
-  // readings, not an event that happened once when /Connected moved.
   const { mod, calls } = loadThermal();
   readyToDump(mod);
   victron(mod, "boilerOperating", BOILER_STOPPED);
   bridge(mod, true);
   bridge(mod, false);
 
-  // What the Cerbo sends back on the next keepalive: every held value, unchanged.
+  // Republish after the next keepalive: the last values, unchanged
   victron(mod, "topTankTemp", 80);
   victron(mod, "bottomTankTemp", 76);
   victron(mod, "boilerOperating", BOILER_STOPPED);
@@ -264,8 +246,6 @@ test("a held tank temperature is shown as no reading rather than as a number", (
   assert.ok(text.indexOf("Tank:?") >= 0, text);
 });
 
-// Dumping heat is a power system optimisation; the boiler making that heat is not. So an
-// unheard state counts as a running boiler.
 test("an unheard boiler state inhibits the thermal dump", () => {
   const { mod, calls } = loadThermal();
   readyToDump(mod);
@@ -298,8 +278,6 @@ test("a running boiler still inhibits the dump once heard", () => {
   assert.deepStrictEqual(switchCommands(calls), []);
 });
 
-// A change made while the broker was away is never repeated, so the reading afterwards is
-// unknown rather than merely old.
 test("a broker drop makes the boiler state unknown again", () => {
   const { mod } = loadThermal();
   victron(mod, "boilerOperating", BOILER_STOPPED);
@@ -313,9 +291,7 @@ test("a broker drop makes the boiler state unknown again", () => {
 
 // ===== The device's own MQTT config =====
 
-// Connected is the ordinary case: the device's MQTT client is up long before the script
-// starts, so a check that only ran when offline would never run at all - which is where
-// this one used to sit.
+// The device's MQTT client is usually connected before the script starts
 function connectedWith(mqttConfig) {
   global.Shelly.getComponentStatus = function () { return { connected: true }; };
   global.Shelly.getComponentConfig = function () { return mqttConfig; };
@@ -383,19 +359,9 @@ test("the status line tells an unheard boiler from a stopped one", () => {
   assert.ok(captureLog(function () { mod.updateStatus(); }).indexOf("Boiler:OFF") >= 0);
 });
 
-// ===== Intended state, and why the handler reads it =====
-//
-// Two things move these relays: this script, and the firmware acting on the
-// device's own input. Both arrive back as the same toggle event, and the handler
-// used to answer every one of them by reading the switch over RPC and running the
-// control logic - inside an event handler, which is how an RPC callback came to
-// re-enter it. Recording what was asked for before asking for it makes the two
-// tellable apart without a call: a toggle that matches the intention is this
-// script's own echo and stops there, and only a toggle that does not is a change
-// to reconcile.
+// ===== Intended state =====
 
-// The handler the device would deliver events to. finishSetup() installs it, and
-// finishSetup does not run under the harness, so a test installs it directly.
+// finishSetup() does not run under the harness, so install the event handler directly
 function eventHandler(loaded) {
   loaded.mod.setupEventHandlers();
   return loaded.handlers.event;
@@ -421,8 +387,7 @@ test("a toggle this controller asked for is its own echo and stops there", () =>
 test("a relay moved at the device is reconciled instead", () => {
   const loaded = loadThermal();
   const fire = eventHandler(loaded);
-  // Nothing was asked for, so intended is false and a relay that has come on is
-  // somebody else's doing - the thermostat wired to the fan coil, most likely.
+  // Nothing was asked for, so this is an external change
 
   const log = captureLog(() => fire(toggle(0, true)));
 
@@ -458,11 +423,6 @@ test("startup takes the intention from the relay, so the first toggle is not rea
 });
 
 // ===== Minimum run time =====
-//
-// Five minutes, and it is one-directional like the boiler's: starting the fan coil
-// and pump costs nothing, stopping them a minute later means the heat they moved
-// is still in the coil and the immersion that cut out has not cooled enough to
-// reset. Nothing delays a start.
 
 test("an output that has just started is not stopped inside five minutes", () => {
   const { mod, calls } = loadThermal();
@@ -502,13 +462,10 @@ test("nothing delays a start", () => {
 });
 
 // ===== The clock jumping =====
-//
-// The minimum run time is an interval within the run, so it is measured against uptime and
-// a wall clock that jumps cannot end it early. See docs/adr/0003.
+// See docs/adr/0003.
 
 test("NTP landing does not retire the minimum run time", () => {
-  // Through the control pass, which is what takes the reading: calling turnOutputOff directly
-  // would never consult a clock at all, and would pass whether or not the bug were present.
+  // refreshUptime() is what reads the clock, so call it
   const { mod, calls } = loadThermal();
   const output = mod.getOutput(0);
   output.on = true;
@@ -525,8 +482,6 @@ test("NTP landing does not retire the minimum run time", () => {
 });
 
 test("an output this run never started waits out nothing", () => {
-  // Under the wall clock a zero stamp read as long elapsed, which is what the call site
-  // wanted. Uptime inverts that, so the sentinel is null and is tested for.
   const { mod, calls } = loadThermal();
   const output = mod.getOutput(0);
   output.on = true;

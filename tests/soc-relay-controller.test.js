@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 Robert McQueen
 //
-// Covers the two roles this one script runs in: the four DHW immersions, which
-// dump surplus, and Heat Pump Enable (.209), which determines shortage. The
-// interesting cases are the ones where a dump load's gates would be wrong on the
-// heat pump — a generation gate or an overload shed that locks a compressor for
-// half an hour — and the shortage thresholds themselves, which exist in this one
-// deployment and nowhere else. Run with: node --test tests/
+// Tests for both roles: DHW immersion (dump load) and Heat Pump Enable (.209,
+// shortage lead). Run with: node --test tests/
 
 const test = require("node:test");
 const assert = require("node:assert");
@@ -27,8 +23,7 @@ const PASSTHRU = 8;
 
 const MINUTES = 60 * 1000;
 
-// The script as deployed on one relay from the table. Reading the device ID is
-// synchronous, so a load gets as far as the role, its topics and its latch on its own.
+// Load the script as one relay from the table
 function loadRelay(deviceId) {
   const loaded = load(DUMP, deviceId);
   assert.strictEqual(loaded.mod.state.identityKnown, true,
@@ -36,7 +31,7 @@ function loadRelay(deviceId) {
   return loaded;
 }
 
-// A plain follower: no time switch on its own input, and it is not the shortage lead.
+// A plain follower: not the lead relay or the shortage lead
 function loadImmersion() {
   return loadRelay(LEFT_TOP);
 }
@@ -51,25 +46,23 @@ function victron(mod, key, value) {
     JSON.stringify({ value: value }));
 }
 
-// What .209 publishes: its relay closed means the heat pump is running, open is shortage.
+// .209's switch status: closed = heat pump running, open = shortage
 function lock(mod, closed) {
   mod.processMqttMessage(HP_LOCK, JSON.stringify({ id: 0, output: closed }));
 }
 
-// What the lead relay publishes when the manual time switch moves.
+// The lead relay's input status (manual time switch)
 function leadInput(mod, active) {
   mod.processMqttMessage(mod.config.leadRelay.inputTopic, JSON.stringify({ state: active }));
 }
 
-// Put the controller in a known place, so a test only states what it is varying.
+// Set a known baseline state
 function settle(mod, relayIsOn) {
   mod.state.relayIsOn = relayIsOn;
   mod.state.intendedRelayOn = relayIsOn;
 }
 
-// What the controller commanded its own relay to do, if anything. Shelly.call
-// never calls back under the harness, so the command is the observable, not the
-// resulting state.
+// The last Switch.Set command, if any (the harness never runs Shelly.call callbacks)
 function switchCommands(calls) {
   return calls
     .filter((c) => c.method === "Switch.Set")
@@ -87,9 +80,6 @@ function bannerText(mod) {
 // ===== Role resolution =====
 
 test("identity is resolved before anything else runs", () => {
-  // Thresholds, gates and topics all depend on which relay this is, and the role decides
-  // the threshold the persisted component is created with, so nothing can happen before
-  // the device has matched itself against the table.
   const { mod, calls } = loadImmersion();
 
   assert.strictEqual(mod.state.deviceName, "DHW Left Top",
@@ -99,8 +89,6 @@ test("identity is resolved before anything else runs", () => {
 });
 
 test("a device the table does not list resolves no role and runs nothing", () => {
-  // The whole of what makes a misdirected deploy safe: no threshold, no topics, no
-  // command. Nothing is retried, because there is nothing to wait for.
   const { mod, calls, timers } = load(DUMP, "shelly1pmg3-000000000000");
 
   assert.strictEqual(mod.state.identityKnown, false);
@@ -115,8 +103,6 @@ test("a DHW immersion is not the shortage lead", () => {
 });
 
 test("the table carries the stagger the immersions exist to have", () => {
-  // A point apart, so they come on in turn rather than all at once. These are the values
-  // the sliders held before the table replaced them.
   const expected = { "543204558c6c": 96, "543204558fc8": 94, "dcda0ce04fb0": 95,
                      "dcda0ce06e98": 96 };
   Object.keys(expected).forEach((id) => {
@@ -160,8 +146,7 @@ test("no relay gets a threshold slider", () => {
 });
 
 test("a threshold component left behind on a device is not read", () => {
-  // The immersions carry a persisted number:202 from the script this one replaced, and
-  // .209 shares that id with smart-load-controller, whose slider stops at 50.
+  // number:202 may be left over from an earlier script
   const { mod } = loadImmersion();
   global.Virtual.getHandle = function () {
     return { getValue: function () { return 50; }, on: function () {} };
@@ -176,10 +161,7 @@ test("a threshold component left behind on a device is not read", () => {
 
 // ===== What shortage is =====
 
-// Three terms, on one device: VE.Bus state, battery SOC and total generation, worked out by
-// .209 alone and expressed on its relay. The SOC term is latched between 30 and 90, so what
-// the battery did matters; between the two, generation settles a latch that has never been
-// resolved. See CONTROLS.md for why the band is that wide.
+// See CONTROLS.md#shortage
 
 test("at or below 30 the system is short whatever is generating", () => {
   const { mod } = loadShortageLead();
@@ -191,9 +173,6 @@ test("at or below 30 the system is short whatever is generating", () => {
     "ten points above the generator autostart, generation is no longer the question");
 });
 
-// The loads shortage sheds are the same loads that move SOC, so a memoryless rule would
-// cycle at the bottom threshold: shed at 30, recover to 31, un-shed, fall back to 30. With
-// 1.5 kW of hydro against a 3 kW heat pump that is a 40-minute cycle, all day.
 test("recovering past 30 does not release the lock", () => {
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
@@ -234,10 +213,6 @@ test("the lock is held until 90, not until generation returns", () => {
   assert.deepStrictEqual(switchCommands(calls), [false, true]);
 });
 
-// A controller starting between the thresholds cannot know which way the battery was going,
-// so it assumes the safe end and lets generation say otherwise. Mid-band with nothing
-// generating is what a degraded system looks like between generator runs, and releasing a
-// 3-5 kW heat pump into that is what the assumption exists to prevent.
 test("a controller starting mid-band assumes shortage", () => {
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
@@ -294,9 +269,6 @@ test("a generator run that clears mid-band returns to the latch, not to 90", () 
     "a passthrough that clears must not leave the heat pump locked until 90%");
 });
 
-// The two terms are separate, and the latch does not wait on the one that overlays it:
-// SOC alone settles it, so a controller that has heard the battery and not yet the inverter
-// still knows which side of 30 it is on.
 test("the SOC terms settle the latch before any VE.Bus reading arrives", () => {
   const { mod } = loadShortageLead();
   victron(mod, "batterySOC", 25);
@@ -340,8 +312,6 @@ test("an idle turbine reporting its own draw is not generation", () => {
 });
 
 test("an immersion does not work shortage out for itself", () => {
-  // Mid-band with nothing generating is a shortage as far as .209 is concerned. An
-  // immersion is not entitled to that opinion: it acts on the lock or not at all.
   const { mod, calls } = loadImmersion();
   settle(mod, false);
   mod.state.leadInputActive = true;
@@ -474,7 +444,7 @@ test("the manual time switch cannot unlock the heat pump", () => {
 });
 
 test("the shortage lead subscribes to no time-switch topic", () => {
-  // The immersion case is the control: it proves the subscription is there to suppress.
+  // Control case: an immersion does subscribe
   const immersion = loadImmersion();
   immersion.mod.handleMqttConnected();
   assert.ok(
@@ -543,10 +513,7 @@ test("an immersion still checks inverter headroom before enabling", () => {
   assert.deepStrictEqual(switchCommands(calls), []);
 });
 
-// The fast path only fires on a relay this script knows is closed, at the moment the
-// reading arrives. The poll is what covers the rest: a relay closed since by the
-// hardware follow, and every enable underneath, which the early return blocks for as
-// long as the overload stands.
+// The fast path only sheds a relay known to be on; the poll covers the rest
 
 test("the poll sheds an overload the fast path was in no position to see", () => {
   const { mod, calls } = loadImmersion();
@@ -604,10 +571,7 @@ test("the manual time switch turns an immersion on well below its SOC threshold"
 
 // ===== Following the heat pump lock =====
 
-// The immersions read one boolean - is the heat pump running - rather than working the
-// shortage terms out themselves. That keeps the heating side out of the power system, and
-// makes the lock something a person can drive by hand: stop .209's script, set its relay,
-// and the followers follow.
+// See CONTROLS.md#who-decides-and-how-the-decision-travels
 
 test("an immersion follows the lock, and .209 follows nothing", () => {
   const immersion = loadImmersion();
@@ -638,10 +602,6 @@ test("an open lock sheds the immersion, time switch and all", () => {
     "safety direction: it happens on the edge, without waiting for a poll");
 });
 
-// Deliberate, and a change from today: the VE.Bus gate sits below the time switch and
-// never sees a calling clock, so a generator run currently leaves the timer working. The
-// whole lock is honoured instead, and the escape hatch stays in one place - closing .209's
-// relay by hand releases the heat pump and the immersions together.
 test("the time switch does not run an immersion off the generator", () => {
   const { mod, calls } = loadImmersion();
   settle(mod, true);
@@ -656,8 +616,7 @@ test("the time switch does not run an immersion off the generator", () => {
 });
 
 test("the lead relay's hardware follow is turned back off", () => {
-  // .90 is in_mode follow, so the time switch closes it in hardware whatever the script
-  // wants. A Switch.Set then overrides follow until the next input edge.
+  // .90 is in_mode follow; Switch.Set overrides follow until the next input edge
   const { mod, calls } = loadRelay(LEAD_RELAY);
   settle(mod, true);
   mod.state.inputIsActive = true;
@@ -696,7 +655,7 @@ test("an immersion keeps its own VE.Bus gate when no lock answers", () => {
     "a dump load must be safe with nothing published by .209 at all");
 });
 
-// The right tank, which waits 10 s to enable after an edge.
+// Right tank: 10 s offset
 function loadRight() {
   return loadRelay(RIGHT);
 }
@@ -793,7 +752,6 @@ test("a reconnect asks both followed devices again", () => {
   mod.processMqttMessage(mod.state.leadRelayTopic, '{"id":0,"state":true}');
   lock(mod, true);
 
-  // A change made while the broker was away is never repeated by either device.
   published.length = 0;
   mod.handleMqttConnected();
   timers.filter((t) => t.repeat === false).pop().fn();
@@ -828,8 +786,6 @@ test("the time switch turning on enables after this relay's offset", () => {
 });
 
 test("the time switch turning off still sheds on the edge", () => {
-  // Below its band, losing the clock is the only thing keeping this relay on, so the edge
-  // is a shed - and shedding never waits.
   const { mod, calls } = loadRight();
   settle(mod, true);
   victron(mod, "vebusState", INVERTING);
@@ -844,9 +800,7 @@ test("the time switch turning off still sheds on the edge", () => {
 });
 
 test("the poll offsets separate the tanks, not the devices", () => {
-  // Left top and left bottom share a slot on purpose: the top element sits in the
-  // stratified layer and almost never calls, so the pair is one 2.7 kW load in practice.
-  // What has to be separated is left from right from annex.
+  // Left top and bottom share a slot. See CONTROLS.md#dump-loads-together
   const expected = {
     "543204558c6c": 0,          // DHW Left Top
     "543204558fc8": 0,          // DHW Left Bottom
@@ -864,9 +818,7 @@ test("the poll offsets separate the tanks, not the devices", () => {
 
 // ===== The latch has one durable copy, and .209 keeps it =====
 
-// Nothing but a command moves the contact, so the switch's own last-command source is the
-// whole question: `init` is `initial_state` restored at boot and nothing since, which is a
-// configuration default rather than a decision.
+// A source of `init` means initial_state at boot, not a command
 test("the shortage lead reads its latch off its own relay contact", () => {
   const { mod } = loadShortageLead();
   mod.state.relayIsOn = true; // the contact says: heat pump running, no shortage
@@ -881,10 +833,6 @@ test("the shortage lead reads its latch off its own relay contact", () => {
 });
 
 test("a contact nothing has commanded is not a decision", () => {
-  // One answer for two cases an uptime reading could not tell apart: a power cut with the
-  // script starting straight after it, and a script deployed hours into a boot. Both find
-  // a contact still on `initial_state: "on"`, and reading that as a decision releases a
-  // 3-5 kW heat pump onto diesel.
   const { mod } = loadShortageLead();
   mod.state.relayIsOn = true;
   global.Shelly.getComponentStatus = function (key) {
@@ -922,8 +870,7 @@ test("an immersion keeps no latch to read", () => {
 // ===== What .209 says it is doing =====
 
 test("the shortage lead claims no shortage it has not established", () => {
-  // inShortage() has three answers and "nothing heard yet" is one of them. Read as a
-  // plain boolean it reads as no shortage, which is the one thing it does not mean.
+  // inShortage() returns null here, which must not read as no shortage
   const { mod } = loadShortageLead();
   settle(mod, true); // .209 boots closed, so the relay is not what is under test here
 
@@ -954,8 +901,6 @@ test("a relay says its own name and which way its contact is", () => {
 });
 
 test("the band on the shortage lead is the shortage terms", () => {
-  // Not a dump load band - it has none - but it reads the same way round, because the
-  // relay closes at the high threshold and opens at the low one.
   const { mod } = loadShortageLead();
 
   assert.ok(statusText(mod).indexOf("[On:90%, Off:30%]") >= 0,
@@ -963,8 +908,6 @@ test("the band on the shortage lead is the shortage terms", () => {
 });
 
 test("the shortage lead reports no lead input it never receives", () => {
-  // It subscribes to no time-switch topic, so leadInputActive never leaves its initial
-  // value - and reporting that as OFF is an invented reading, not a quiet one.
   const { mod } = loadShortageLead();
   settle(mod, true);
 
@@ -1011,14 +954,12 @@ test("an immersion's banner still states its band", () => {
 
 // ===== The decision has to leave the device =====
 
-// Every follower of .209 reads its published switch status, so a device with status
-// notifications off is a controller whose decision never leaves it.
+// Followers read .209's published switch status
 test("status notifications are turned on if the device has them off", () => {
   const { mod, calls } = loadShortageLead();
   const server = mod.config.cerbo.host + ":" + mod.config.cerbo.port;
 
-  // Connected is the ordinary case: the device's MQTT client is up long before the script
-  // starts, so a check that only ran when offline would never run at all.
+  // Already connected, the usual case at script start
   global.Shelly.getComponentStatus = function () { return { connected: true }; };
   global.Shelly.getComponentConfig = function () {
     return { enable: true, server: server, status_ntf: false };
@@ -1097,10 +1038,6 @@ test("a firmware without a status notification setting is not rebooted", () => {
 
 // ===== Which term locked the relay decides how it is released =====
 
-// The two terms are not symmetrical. A battery at 30% is released by reaching 90%; a
-// passthrough or a fault at 60% is released by the passthrough or fault ending. Holding
-// the second to the first would lock the heat pump until the battery next reached 90% —
-// days, on hydro alone — and would present to every follower as a battery shortage.
 test("no relay is commanded before the role is known", () => {
   const { mod, calls } = load(DUMP); // identity deliberately unresolved
   mod.state.relayIsOn = true;
@@ -1115,9 +1052,6 @@ test("no relay is commanded before the role is known", () => {
 
 // ===== Losing the broker =====
 
-// Installed on the already-connected path, which is the only path a running device takes:
-// without them a controller never learns the broker has gone and the gate goes on reading
-// a VE.Bus state frozen hours ago.
 test("a disconnect handler is installed even when MQTT is already connected", () => {
   const { mod, handlers } = loadShortageLead();
   const server = mod.config.cerbo.host + ":" + mod.config.cerbo.port;
@@ -1139,11 +1073,7 @@ test("a disconnect handler is installed even when MQTT is already connected", ()
 
 // ===== Seeding a value that almost never changes =====
 
-// The broker publishes nothing until a value changes, so a state that changes only when a
-// generator runs is only ever seen in a republish burst — and the subscriptions are not
-// reliably live in time for the one the first keepalive triggers. Everything else in the
-// topic set changes every few seconds and arrives regardless, so this fails silently on
-// exactly one topic: the one the VE.Bus gate depends on.
+// Victron publishes only on change, so VE.Bus state is seen only in a republish
 test("keepalives keep requesting a republish until VE.Bus has been seen", () => {
   const { mod, published, timers } = loadImmersion();
   mod.handleMqttConnected();
@@ -1196,11 +1126,7 @@ test("the first republish request waits for the subscriptions to land", () => {
 
 // ===== Picking up the time switch the lead relay already holds =====
 
-// Shelly publishes status on change and does not retain it, so a follower that has just
-// started believes the time switch is off until the lead next moves — hours, for a time
-// clock. Publishing `status_update` to the lead's command topic makes it republish every
-// component on the topics this controller already subscribes to: the same trick as the
-// Victron keepalive above, and it costs no extra subscription and no HTTP.
+// Shelly publishes status only on change; `status_update` on the command topic republishes
 function statusUpdates(published, mod) {
   return published.filter((p) => p.topic === mod.config.leadRelay.commandTopic &&
                                  p.payload === "status_update");
@@ -1257,8 +1183,6 @@ test("the shortage lead asks for no time switch", () => {
   assert.deepStrictEqual(statusUpdates(published, mod), []);
 });
 
-// A broker drop is not just a gap in the data: the time switch may have moved while the
-// follower was away, and the lead will not say so again until it next moves.
 test("a reconnect asks the lead again", () => {
   const { mod, published, timers } = loadImmersion();
   mod.handleMqttConnected();
@@ -1274,15 +1198,10 @@ test("a reconnect asks the lead again", () => {
 });
 
 // ===== The clock jumping =====
-//
-// Every interval within a run is measured against uptime so that an NTP sync cannot
-// reach it. See docs/adr/0003.
+// Intervals use uptime. See docs/adr/0003.
 
 test("NTP landing does not expire the startup grace", () => {
-  // The whole incident in one test: .209 boots, has heard nothing from the Cerbo yet, and
-  // the wall clock jumps twelve days. A grace measured on Date.now() ends instantly,
-  // inShortage() answers true rather than null, and the lock opens on a battery nobody has
-  // read.
+  // .209 boots, hears nothing, and the wall clock jumps twelve days
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
 
@@ -1295,7 +1214,6 @@ test("NTP landing does not expire the startup grace", () => {
 });
 
 test("the grace still ends, on the clock that cannot jump", () => {
-  // The other half: uptime must not freeze the grace open either.
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
 
@@ -1307,8 +1225,6 @@ test("the grace still ends, on the clock that cannot jump", () => {
 });
 
 test("a device that cannot read its own uptime lets no interval elapse", () => {
-  // An unreadable `sys` leaves state.nowUptime standing rather than advancing, so an
-  // interval that cannot be measured has not elapsed - and nothing acts on it.
   const { mod, calls } = loadShortageLead();
   settle(mod, true);
   global.Shelly.getComponentStatus = function () { return null; };
