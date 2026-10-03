@@ -155,6 +155,7 @@ let state = {
   vebusReceived: false,      // Whether a VE.Bus state has ever arrived. Not cleared on a
                              // broker drop: a stale reading is trouble, an absent one is
                              // only a controller that has just started
+  vebusStale: false,         // Cleared by a broker drop until VE.Bus is heard again
   inverterOutput: 0,         // VE.Bus inverter output power (W)
 
   // Lead relay state
@@ -736,6 +737,7 @@ function processMqttMessage(topic, message) {
       let prevState = state.vebusState;
       state.vebusState = parseInt(payload.value);
       state.vebusReceived = true;
+      state.vebusStale = false;
       // Log on state change
       if (prevState !== state.vebusState) {
         console.log("VE.Bus state: " + state.vebusState + " (" + getVebusStateString(state.vebusState) + ")");
@@ -804,7 +806,7 @@ function handleMqttConnected() {
     Timer.clear(state.keepaliveTimer);
   }
   state.keepaliveTimer = Timer.set(30000, true, function() {
-    sendKeepalive(state.vebusReceived);
+    sendKeepalive(state.vebusReceived && !state.vebusStale);
     requestFollowedStatus(false);
   });
 }
@@ -859,6 +861,7 @@ function resetMqttData() {
   state.acGeneration = 0;
   state.dcGeneration = 0;
   state.vebusState = 0;
+  state.vebusStale = true;
   state.inverterOutput = 0;
   if (!state.isLeadRelay) {
     state.leadInputActive = false;

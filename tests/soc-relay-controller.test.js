@@ -1221,6 +1221,23 @@ test("keepalives keep requesting a republish until VE.Bus has been seen", () => 
     "once seen, stop asking the whole system to republish every 30 seconds");
 });
 
+test("keepalives ask for VE.Bus again after a broker drop", () => {
+  const { mod, published, timers } = loadImmersion();
+  mod.handleMqttConnected();
+  victron(mod, "vebusState", INVERTING);
+  mod.resetMqttData();
+
+  const keepalive = timers.filter((t) => t.repeat === true).pop();
+  published.length = 0;
+  keepalive.fn();
+  assert.strictEqual(published[0].payload, "");
+
+  victron(mod, "vebusState", INVERTING);
+  published.length = 0;
+  keepalive.fn();
+  assert.ok(published[0].payload.indexOf("suppress-republish") >= 0);
+});
+
 test("the first republish request waits for the subscriptions to land", () => {
   const { mod, published, timers } = loadImmersion();
   mod.handleMqttConnected();
