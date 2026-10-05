@@ -105,7 +105,7 @@ The canonical list. Correct it here and nowhere else.
 | 192.168.1.71 | Cerbo GX | MQTT broker, VRM gateway |
 | 192.168.1.65 | Shelly Pro 1PM `shellypro1pm-5c013b056870` | Buffer immersion 4 — switched by `surplus-dump-controller.js` on .251 over MQTT RPC |
 | 192.168.1.88 | Shelly 1PM Gen3 `shelly1pmg3-543204558c6c` | DHW immersion — Left Top |
-| 192.168.1.89 | Shelly Pro 3EM `shellypro3em-2cbcbba67614` | *Heat Pump Power* — **triphase** profile, heat pump on phase A. Read it as `em:0` (`a_act_power`); `EM1.GetStatus` returns 404 in this profile |
+| 192.168.1.89 | Shelly Pro 3EM `shellypro3em-2cbcbba67614` | *Heat Pump Power* — **triphase** profile, heat pump on phase A, because the Cerbo does not read a 3EM in the monophase profile. Read it as `em:0` (`a_act_power`); `EM1.GetStatus` returns 404 in this profile |
 | 192.168.1.90 | Shelly 1PM Gen3 `shelly1pmg3-543204558fc8` | DHW immersion — Left Bottom, **lead relay**, time switch on its input |
 | 192.168.1.91 | Shelly 1PM Gen3 `shelly1pmg3-dcda0ce04fb0` | DHW immersion — Right |
 | 192.168.1.100 | Shelly 1PM Gen3 `shelly1pmg3-dcda0ce06e98` | DHW immersion — Annex |

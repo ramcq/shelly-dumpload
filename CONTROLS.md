@@ -158,7 +158,7 @@ regardless, since that means the battery is carrying the dumps.
 contribution, and each DHW immersion has a generation gate and a headroom check, but nothing
 arbitrates between them. If several dump loads are on and generation drops away (a hydro
 trip), load can exceed inverter capacity until the loads shed on SOC. The heat pump is not
-gated on surplus but is 3–5 kW of the house load the calculation starts from.
+gated on surplus but is up to 5 kW of the house load the calculation starts from.
 
 **The immersions come back one tank at a time.** SOC crossing four thresholds a point apart
 staggers the immersions, but above 96% all four are satisfied at once. The lock closing, or
@@ -272,9 +272,9 @@ its own surplus criteria.
 file. A slider drifts: component `202` is shared with the old `smart-load-controller.js`,
 stops at 50, and had already disagreed with the documents about .90 and .91.
 
-**No heat pump headroom check.** Its draw modulates between about 0.5 and 5 kW and its meter
-is not on the Cerbo, so any reserved constant would be wrong. Overload reaches it through
-VE.Bus.
+**No heat pump headroom check.** Its draw modulates between about 0.5 and 5 kW, so any
+reserved constant would be wrong, and its meter (`acload/60`) shows only what it draws while
+running. Overload reaches it through VE.Bus.
 
 ---
 

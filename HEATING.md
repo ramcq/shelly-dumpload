@@ -21,8 +21,7 @@ Space heating was historically all biomass, with hot water either from biomass i
 or direct electric immersion in summer. The heat pump moves day-to-day heating off the
 boiler at CoP ~3, puts the house on weather compensation, and is remotely controllable.
 It runs on the house supply like any other load — it is not surplus-gated. The only
-reason to disable it is a prolonged shortage of power, at which point the biomass takes
-over.
+reason to lock it is a shortage of power, and if that lasts the biomass takes over.
 
 | Parameter | Value | Source |
 |---|---|---|
@@ -268,15 +267,14 @@ three cylinder stats downstream decide whether heat actually moves.
 ## Interaction with the power system
 
 - The heat pump runs on the house supply like any other load. It is not surplus-gated, and
-  the only reason to disable it is a prolonged shortage of power — see
-  [CONTROLS.md](CONTROLS.md).
+  the only reason to lock it is a shortage of power — see [CONTROLS.md](CONTROLS.md).
 - When it runs, its ΔT-modulated pump **mixes the buffer**, degrading the stratification that
   `thermal-dump-controller.js` depends on to recover the buffer immersions from thermal
   cutout. Worth watching when both run together.
 - The heat loop pump runs continuously at low flow temperatures and also mixes the buffer.
   Options discussed: a ΔT pump on the heat loop, or removing the plate heat exchanger and
   adding a strainer on the radiator return.
-- Heat pump consumption is metered by a Shelly Pro 3EM and reaches the Cerbo as an AC load,
+- Heat pump consumption is metered by a Shelly Pro 3EM and reaches the Cerbo as `acload/60`,
   so it is visible in VRM and to any script — see [POWER.md](POWER.md).
 
 ---
@@ -316,8 +314,7 @@ insensitiveness 1.0 °C, proportionality 3.0, integral 160.0; circuits 1 and 3 d
 
 ## Outstanding work and known issues
 
-Plant issues only. Controller work is in [CONTROLS.md](CONTROLS.md); device and metering
-issues are in [POWER.md](POWER.md).
+Plant issues only. Device and metering issues are in [POWER.md](POWER.md).
 
 | Item | Status |
 |---|---|

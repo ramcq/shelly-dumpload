@@ -92,8 +92,8 @@ _Avoid_: Opportunistic enable, DHW schedule, synthetic timer
 
 **Lead relay**:
 The device in a group that owns a decision; the others read it rather than recompute it.
-There are two: the DHW immersion with the manual time switch on its input (.90), and Heat
-Pump Enable (.209), whose relay is the shortage state.
+*The lead relay* is the DHW immersion with the manual time switch on its input (.90). Heat
+Pump Enable (.209), whose relay is the shortage state, is the *shortage lead*.
 _Avoid_: Master, primary, coordinator
 
 **Generation gate**:
