@@ -46,3 +46,13 @@ Shelly globals and exports a controller's internals.
 
 `Script.List` on a device is the record of what is running there. The documents keep no second
 copy.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on ramcq/shelly-dumpload, via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the root. See `docs/agents/domain.md`.
