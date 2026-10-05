@@ -17,7 +17,7 @@ This file describes each script and how it is deployed. The reasons are elsewher
 | [POWER.md](POWER.md) | The electrical installation: generation, battery, inverters, generator settings, power flow, the device inventory |
 | [HEATING.md](HEATING.md) | The heating plant: heat pump, biomass boiler, buffer, zones, wiring, commissioning |
 | [CONTROLS.md](CONTROLS.md) | The system as a whole: shortage, who decides it, what each actuator does, and why |
-| [CONTEXT.md](CONTEXT.md) | The glossary |
+| [GLOSSARY.md](GLOSSARY.md) | The glossary |
 | [docs/adr/](docs/adr) | One decision each: what was chosen, what was rejected, and what that cost |
 | [docs/](docs) | The archive: incident write-ups and equipment manuals |
 
@@ -211,7 +211,7 @@ stages of `surplus-dump-controller.js`.
 
 **Device:** Shelly 1 Mini Gen3 (Boiler Release, .164)
 **Purpose:** Close the Fröling's volt-free release contact. A release is permission, not a
-command to burn — see [CONTEXT.md](CONTEXT.md)
+command to burn — see [GLOSSARY.md](GLOSSARY.md)
 
 **What it does.** One ladder, first match wins:
 

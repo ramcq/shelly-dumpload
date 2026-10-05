@@ -7,7 +7,7 @@ There was no rule for where a sentence belonged.
 ## The rule
 
 - **Each document has one subject:** the electrical installation (POWER), the heat plant
-  (HEATING), how they interact (CONTROLS), the scripts (README), the vocabulary (CONTEXT). The
+  (HEATING), how they interact (CONTROLS), the scripts (README), the vocabulary (GLOSSARY). The
   map is in README.
 - **README states; every other document may argue within its subject.** README says what a
   script does, reads and requires, and how it is deployed. The reasons behind a script are

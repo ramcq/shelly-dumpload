@@ -9,7 +9,7 @@ This document covers the plant: what is installed, how it is piped, how it is wi
 it is configured. What the controllers *do* with it — shortage, the heat pump lock, biomass
 release, DHW enable — is in [CONTROLS.md](CONTROLS.md). The electrical installation and the
 device inventory are in [POWER.md](POWER.md), the scripts in [README.md](README.md), and the
-vocabulary all four share in [CONTEXT.md](CONTEXT.md).
+vocabulary all four share in [GLOSSARY.md](GLOSSARY.md).
 
 The heating plant and the power system are coupled — same buffer, same surplus.
 
@@ -90,7 +90,7 @@ SCOP 3.88 at 45 °C. Project references RH1663 / REN-003505 / job 5441.
 the house side, with the pre-PHE circulation pump in the atrium cupboard.
 
 Buffer immersions are only ever dump loads — nothing but surplus ever asks for them. The
-DHW immersions in the cylinders are the dual-purpose ones; see [CONTEXT.md](CONTEXT.md).
+DHW immersions in the cylinders are the dual-purpose ones; see [GLOSSARY.md](GLOSSARY.md).
 
 | Immersion | Switched by | IP | Status |
 |---|---|---|---|

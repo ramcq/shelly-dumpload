@@ -16,10 +16,10 @@ is deployed. Every *why* — the reason for a threshold, the alternative rejecte
 | `CONTROLS.md` | two or more devices interacting, or any reason the site behaves as it does |
 | `POWER.md` | the electrical installation, or the device inventory |
 | `HEATING.md` | the heat plant |
-| `CONTEXT.md` | what a word means |
+| `GLOSSARY.md` | what a word means |
 | `docs/adr/` | a decision, with what was rejected and what it cost |
 
-POWER, HEATING and CONTEXT argue within their own subject. README is the one document that
+POWER, HEATING and GLOSSARY argue within their own subject. README is the one document that
 does not.
 
 A table row or a clause may name another document's material. Prose that re-derives it goes in
@@ -32,7 +32,7 @@ the document that owns it, with a link to it from here.
 - **Code** says what it does and points at the document. `dhw-controller.js:1-12` is the shape.
   A comment is a line or two; a constant gets a trailing unit and meaning, not a paragraph.
 
-Write plainly, in the fewest words that carry the reason, using the term CONTEXT.md defines.
+Write plainly, in the fewest words that carry the reason, using the term GLOSSARY.md defines.
 State; don't argue, tell anecdotes, or coin terms. A document section should read as rules
 and their reasons, not as the history of how they were reached.
 
