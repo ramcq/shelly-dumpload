@@ -463,6 +463,22 @@ test("a stage that has just changed is not read as stalled", () => {
   assert.strictEqual(mod.calculateDesiredState(2 * HEATER).intendedPower, 2 * HEATER);
 });
 
+test("a dimmer drawing nothing at mains voltage is read as stalled on the next poll", () => {
+  const { mod, statuses } = loadController();
+  dumping(mod);
+  mod.state.vebusState = INVERTING;
+  mod.state.batterySOC = 97;
+  mod.state.solarPower = 4 * HEATER + mod.config.dumpLoad.batteryHeadroom;  // all four stages
+  mod.state.localDimmer.voltage = 0;  // as read at startup with the output off
+  statuses["light:0"] = { output: true, brightness: 100, voltage: 228, apower: 0 };
+
+  mod.checkSystemState();
+
+  assert.strictEqual(mod.state.localDimmer.voltage, 228);
+  assert.strictEqual(mod.state.intendedDumpPower, 3 * HEATER,
+    "a dimmer at 100% drawing nothing must not be counted as 2.69 kW dumped");
+});
+
 // ===== Addressing: index is not the device channel =====
 
 test("stage index maps to the right device and channel", () => {

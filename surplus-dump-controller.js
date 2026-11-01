@@ -314,9 +314,6 @@ function finishSetup() {
     console.log("Error getting component handles: " + e.message);
   }
 
-  // Set up event handlers
-  setupEventHandlers();
-
   // Start MQTT connection
   connectMqtt();
 
@@ -338,34 +335,6 @@ function finishSetup() {
   console.log("==================================================");
 
   updateStatus("Monitoring started");
-}
-
-// ===== Status handlers =====
-function setupEventHandlers() {
-  logDebug("Setting up status handlers");
-
-  // Watch for local light:0 status changes (avoids RPC re-entrancy)
-  Shelly.addStatusHandler(function(event) {
-    if (!event || event.component !== "light:0" || !event.delta)
-      return;
-
-    if (event.delta.hasOwnProperty("output")) {
-      state.localDimmer.on = Boolean(event.delta.output);
-      logDebug("Local output: " + state.localDimmer.on);
-    }
-    if (event.delta.hasOwnProperty("brightness")) {
-      state.localDimmer.brightness = parseFloat(event.delta.brightness);
-      logDebug("Local brightness: " + state.localDimmer.brightness + "%");
-    }
-    if (event.delta.hasOwnProperty("voltage")) {
-      state.localDimmer.voltage = parseFloat(event.delta.voltage);
-      logDebug("Local voltage: " + state.localDimmer.voltage + "V");
-    }
-    if (event.delta.hasOwnProperty("apower")) {
-      state.localDimmer.power = parseFloat(event.delta.apower);
-      logDebug("Local power: " + state.localDimmer.power + "W");
-    }
-  });
 }
 
 // ===== MQTT connection and message handling =====
@@ -699,18 +668,18 @@ function connectMqtt() {
 }
 
 // ===== Device state management =====
-// Synchronously update local dimmer state from device
+// Read the local dimmer from the device, at startup and every poll: the stall check needs
+// its current voltage and power (README, surplus-dump-controller.js).
 function updateLocalDimmerState() {
   let lightStatus = Shelly.getComponentStatus("light:0");
 
   if (lightStatus) {
-    // Initialize all state fields from status
     state.localDimmer.on = lightStatus.output || false;
     state.localDimmer.brightness = lightStatus.brightness || 0;
     state.localDimmer.voltage = lightStatus.voltage || 0;
     state.localDimmer.power = lightStatus.apower || 0;
 
-    logDebug("Initial light state: on=" + state.localDimmer.on +
+    logDebug("Light state: on=" + state.localDimmer.on +
             ", brightness=" + state.localDimmer.brightness + "%" +
             ", voltage=" + state.localDimmer.voltage + "V" +
             ", power=" + state.localDimmer.power + "W");
@@ -1037,6 +1006,7 @@ function applyDesiredState(desired, reason) {
 
 function checkSystemState() {
   refreshUptime();
+  updateLocalDimmerState();
 
   // INITIALIZATION: Wait for all switch statuses, then initialize intended power
   if (!state.initialized) {

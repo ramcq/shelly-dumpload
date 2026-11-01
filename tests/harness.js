@@ -101,20 +101,22 @@ function sysStatus() {
 }
 
 // Load a fresh copy of `scriptName` as if on `deviceId` (default: no role).
-// Returns its exports and recorded MQTT, RPC calls, timers and handlers.
+// Returns its exports, recorded MQTT, RPC calls, timers and handlers, and `statuses`:
+// component statuses a test sets for Shelly.getComponentStatus to return.
 function load(scriptName, deviceId) {
   const published = [];
   const subscribed = [];
   const calls = [];
   const timers = [];
   const handlers = {};
+  const statuses = {};
 
   // Fresh clock per load.
   clockUptimeMs = INITIAL_UPTIME_MS;
 
-  // Only `sys` has a status.
+  // `sys` from the clock; anything else only once a test sets it.
   function deviceStatus(key) {
-    return key === "sys" ? sysStatus() : null;
+    return key === "sys" ? sysStatus() : (statuses[key] || null);
   }
 
   const source =
@@ -169,7 +171,7 @@ function load(scriptName, deviceId) {
     fs.unlinkSync(tmp);
   }
 
-  return { mod, published, subscribed, calls, timers, handlers };
+  return { mod, published, subscribed, calls, timers, handlers, statuses };
 }
 
 // Run fn with Date.now jumped twelve days ahead, as when NTP lands after boot.

@@ -160,7 +160,8 @@ Priority, first match wins:
 **What it reads.** Seven Victron subscriptions — `system/0/Ac/PvOnOutput/L1/Power`,
 `dcsource/279/Dc/0/Power`, `system/0/Ac/ConsumptionOnOutput/L1/Power`, `evcharger/40/#`,
 `system/0/Dc/Battery/Soc`, `vebus/276/State`, `vebus/276/Ac/Out/L1/P` — plus one
-`<device-id>/status/+` per remote device: nine in all.
+`<device-id>/status/+` per remote device: nine in all. Its own `light:0` it reads from the
+device every poll.
 
 **What it requires.** Remote stages `detached` with `initial_state: "off"`
 ([relay configuration](CONTROLS.md#relay-configuration)). `status_ntf` on this device, which
@@ -307,8 +308,8 @@ needs has not arrived: `vebus/276/State` (soc-relay, surplus-dump), the boiler i
 One text component per script, for its status line. No settings are exposed.
 
 ### Event-Driven Architecture
-Local changes arrive through `Shelly.addEventHandler()` (`Shelly.addStatusHandler()` in
-`surplus-dump-controller.js`); each script also polls.
+Local changes arrive through `Shelly.addEventHandler()`; each script also polls.
+`surplus-dump-controller.js` reads its dimmer on the poll only.
 
 ### MQTT Subscription Budget
 A script may hold **ten** MQTT subscriptions. The eleventh throws `Too many subscriptions` and
