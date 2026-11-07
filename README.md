@@ -128,7 +128,7 @@ and channel:
 | 4 | Local 0–10 V dimmer output, 0–100% | Buffer immersion 3 |
 
 ```
-Available = Solar + DC Hydro - AC Consumption + Intended Dumps - EV Headroom - Battery Headroom
+Available = Solar + DC Hydro - AC Consumption + Intended Dumps - Headroom
 ```
 
 Dump power is the intended figure, not the measured one, except in dry-run mode.
@@ -139,7 +139,8 @@ Priority, first match wins:
    (90 s), then treat silent stages as off. Loads found running are adopted, not shed.
 2. **VE.Bus state** — all off unless Inverting (9), or unheard
 3. **Low SOC** — all off below `soc.targetSOC` (97%)
-4. **EV charging in auto** — surplus control
+4. **EVCS in auto with a car** — surplus control while the EVCS is in Auto and Charging (2),
+   Waiting for sun (4) or Starting to charge (21)
 5. **High SOC** — above target, dump up to the inverter limit
 6. **Surplus control** — sequential allocation
 
@@ -147,8 +148,11 @@ Priority, first match wins:
   stays within `dumpLoad.maxInverterContribution` (12 kW). Inverter output over
   `dumpLoad.emergencyInverterLimit` (13 kW) sheds every stage on the MQTT message. Power flow
   is in [POWER.md](POWER.md).
-- **Headroom:** while the EVSE charges in auto, 460 W (2 A at 230 V), or `evse.maxHeadroom`
-  (7360 W) minus charger power if less; otherwise `dumpLoad.batteryHeadroom` (200 W).
+- **Headroom:** `dumpLoad.batteryHeadroom` (200 W), plus, while the EVCS is in auto with a
+  car, `evcs.startHeadroom` (1380 W, 6 A) minus EVCS power, but at least
+  `evcs.stepHeadroom` (460 W, 2 A) and at most `evcs.maxHeadroom` (7360 W) minus EVCS power.
+  EVCS power below 0 counts as 0. While the EVCS charges (2), the battery's 200 W is
+  dropped.
 - **Stall:** a stage on, at 200 V or more and 50 W or less, has reached its thermal cutout. It
   stays on and its budget goes to the next stage. Not checked for 30 s after a change.
 - **Minimum change time:** `dumpLoad.minChangeTime` (10 min) per stage, both directions.
@@ -168,7 +172,8 @@ device every poll.
 the script asserts, and on each remote device.
 
 **Configuration.** `remoteSwitches.switches`, one entry per remote stage;
-`dumpLoad.heaterPower` (2690 W); `dryRun`; `soc.targetSOC`; `evse.maxHeadroom`.
+`dumpLoad.heaterPower` (2690 W); `dryRun`; `soc.targetSOC`; `evcs.maxHeadroom`,
+`evcs.startHeadroom`, `evcs.stepHeadroom`.
 
 **Virtual components.** `text:200`, the status line.
 

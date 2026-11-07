@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 Robert McQueen
 //
-// Surplus Dump Load Controller for Shelly Pro 0/1-10V Dimmer
-// Monitors Victron energy and controls four 2.69kW dump loads:
-// - Local dimmer output (SSR controlled via 0-10V)
-// - Two remote switches on Shelly Pro 2PM (via MQTT RPC)
-// - One remote switch on Shelly Pro 1PM (via MQTT RPC)
+// Surplus Dump Controller for Shelly Pro 0/1-10V Dimmer (192.168.1.251)
+// Runs four 2.69 kW buffer immersions on surplus: this device's 0-10 V output and three
+// remote relays over MQTT RPC.
 //
-// Algorithm: Available = Solar + DC Hydro - AC + Intended Dumps - EV Headroom
-// Uses intended dump power (not actual) to avoid feedback loops
-// Suppresses dumps if SOC < target or generator active
+// Ladder, first match wins:
+//   1. VE.Bus not inverting, or SOC below target: all off
+//   2. EVCS in auto with a car: surplus control, leaving the EVCS its headroom
+//   3. SOC above target: dump up to the inverter limit
+//   4. Surplus control
+//
+// Rules and reasoning in CONTROLS.md#dump-loads-together.
 
 // ===== Configuration =====
 let config = {
@@ -34,9 +36,9 @@ let config = {
     solarPower: "system/0/Ac/PvOnOutput/L1/Power",           // AC-coupled generation (solar + AC hydro) (W)
     dcHydroPower: "dcsource/279/Dc/0/Power",                 // DC-coupled hydro turbine power (W)
     acConsumption: "system/0/Ac/ConsumptionOnOutput/L1/Power", // AC consumption (W)
-    evChargerPower: "evcharger/40/Ac/Power",      // EV charger power (W)
-    evChargerStatus: "evcharger/40/Status",       // EV charger status (2=Charging)
-    evChargerMode: "evcharger/40/Mode",           // EV charger mode (0=Manual, 1=Auto, 2=Scheduled)
+    evChargerPower: "evcharger/40/Ac/Power",      // EVCS power (W)
+    evChargerStatus: "evcharger/40/Status",       // EVCS status, see getEvStatusString
+    evChargerMode: "evcharger/40/Mode",           // EVCS mode (0=Manual, 1=Auto, 2=Scheduled)
     batterySOC: "system/0/Dc/Battery/Soc",        // Battery SOC (%)
     vebusState: "vebus/276/State",                 // VE.Bus state (9=Inverting required for dump loads)
     inverterOutput: "vebus/276/Ac/Out/L1/P"       // VE.Bus inverter output power (W)
@@ -54,9 +56,11 @@ let config = {
     "vebus/276/Ac/Out/L1/P"
   ],
 
-  // EVSE control
-  evse: {
-    maxHeadroom: 7360         // W - max headroom to reserve when EVSE is in auto mode (230V × 32A)
+  // EVCS headroom, in auto with a car
+  evcs: {
+    maxHeadroom: 7360,        // W - EVCS ceiling, 230 V × 32 A
+    startHeadroom: 1380,      // W - EVCS minimum, 230 V × 6 A, less what it already draws
+    stepHeadroom: 460         // W - one 2 A step, the least ever left
   },
 
   // SOC control
@@ -107,7 +111,7 @@ let state = {
   dcHydroPower: 0,
   acConsumption: 0,
   evChargerPower: 0,
-  evChargerStatus: 0,        // 0=Disconnected, 1=Connected, 2=Charging, 3=Charged
+  evChargerStatus: 0,        // see getEvStatusString
   evChargerMode: 0,          // 0=Manual, 1=Auto, 2=Scheduled
   batterySOC: 0,             // Battery state of charge (%)
   vebusState: 0,             // VE.Bus state (0=Off, 9=Inverting)
@@ -241,10 +245,9 @@ function updateStatus(event) {
     (state.vebusReceived ? getVebusStateString(state.vebusState) : "?");
 
   let evPart = "";
-  if (state.evChargerStatus === 2) {
-    evPart = " EV:Charging(" + getEvModeString(state.evChargerMode) + ")";
-  } else if (state.evChargerStatus === 1) {
-    evPart = " EV:Connected";
+  if (state.evChargerStatus !== 0) {
+    evPart = " EV:" + getEvStatusString(state.evChargerStatus) +
+      "(" + getEvModeString(state.evChargerMode) + ")";
   }
 
   let dumpPower = getDumpLoadPower();
@@ -403,22 +406,22 @@ function processMqttMessage(topic, message) {
       state.acConsumption = parseFloat(payload.value);
     }
 
-    // Update EV charger power
+    // Update EVCS power
     if (relativeTopic === config.victron.evChargerPower) {
       state.evChargerPower = parseFloat(payload.value);
     }
 
-    // Update EV charger status
+    // Update EVCS status
     if (relativeTopic === config.victron.evChargerStatus) {
       state.evChargerStatus = parseInt(payload.value);
-      logDebug("EV charger status updated: " + state.evChargerStatus +
+      logDebug("EVCS status updated: " + state.evChargerStatus +
               " (" + getEvStatusString(state.evChargerStatus) + ")");
     }
 
-    // Update EV charger mode
+    // Update EVCS mode
     if (relativeTopic === config.victron.evChargerMode) {
       state.evChargerMode = parseInt(payload.value);
-      logDebug("EV charger mode updated: " + state.evChargerMode +
+      logDebug("EVCS mode updated: " + state.evChargerMode +
               " (" + getEvModeString(state.evChargerMode) + ")");
     }
 
@@ -459,7 +462,10 @@ function getEvStatusString(status) {
   if (status === 1) return "Connected";
   if (status === 2) return "Charging";
   if (status === 3) return "Charged";
-  return "Unknown";
+  if (status === 4) return "Waiting for sun";
+  if (status === 6) return "Waiting for start";
+  if (status === 21) return "Starting to charge";
+  return "Status " + status;
 }
 
 function getEvModeString(mode) {
@@ -735,10 +741,17 @@ function setLocalDimmer(turnOn, brightness, reason) {
 }
 
 // ===== Surplus calculation and control logic =====
-function isEvChargingInAuto() {
-  // Check if EV charger is actively charging in auto mode
-  // Mode 1 = Auto, Status 2 = Charging
-  return state.evChargerMode === 1 && state.evChargerStatus === 2;
+function isEvcsAutoWithCar() {
+  // Auto mode, and Charging, Waiting for sun or Starting to charge
+  let s = state.evChargerStatus;
+  return state.evChargerMode === 1 && (s === 2 || s === 4 || s === 21);
+}
+
+function getEvcsHeadroom() {
+  // Its draw is already in AC consumption. See CONTROLS.md#dump-loads-together.
+  let p = Math.max(0, state.evChargerPower);
+  let h = Math.max(config.evcs.startHeadroom - p, config.evcs.stepHeadroom);
+  return Math.max(0, Math.min(config.evcs.maxHeadroom - p, h));
 }
 
 function isLoadStalled(load, lastChangeUptime) {
@@ -791,17 +804,14 @@ function calculateAvailablePower(useActualDumpPower) {
 
   let available = state.solarPower + state.dcHydroPower - state.acConsumption + dumpPower;
 
-  // EV charger in auto mode: reserve headroom to avoid fighting with its surplus control
-  let evCharging = isEvChargingInAuto();
-  if (evCharging) {
-    let evHeadroom = Math.min(460, config.evse.maxHeadroom - state.evChargerPower);
+  if (isEvcsAutoWithCar()) {
+    let evHeadroom = getEvcsHeadroom();
     available -= evHeadroom;
-    logDebug("EVSE auto mode active, reserving " + evHeadroom.toFixed(0) + "W headroom (2A margin)");
+    logDebug("EVCS in auto, leaving " + evHeadroom.toFixed(0) + "W headroom");
   }
 
-  // Battery headroom: reserve power for parasitic loads + trickle charge
-  // Skip during EV charging to absorb EVSE ampere-step surplus (prevents SOC drift 97%→98%)
-  if (!evCharging) {
+  // Battery headroom, except while the EVCS charges: it takes the trickle instead
+  if (!(isEvcsAutoWithCar() && state.evChargerStatus === 2)) {
     available -= config.dumpLoad.batteryHeadroom;
   }
 
@@ -1065,17 +1075,15 @@ function checkSystemState() {
     return;
   }
 
-  // PRIORITY 3: EV auto mode - always use normal surplus control
-  // When EV is in auto mode, it naturally manages surplus and prevents overcharge
-  // Using max dumps would cause EV to reduce charging, creating oscillation
-  if (isEvChargingInAuto()) {
-    logDebug("EV in auto mode - using normal surplus control (SOC: " + state.batterySOC + "%)");
-    controlDumpLoads(false);  // Normal mode with EV headroom reservation
+  // PRIORITY 3: EVCS in auto with a car - surplus control, never max dump
+  if (isEvcsAutoWithCar()) {
+    logDebug("EVCS in auto - using normal surplus control (SOC: " + state.batterySOC + "%)");
+    controlDumpLoads(false);  // Normal mode with EVCS headroom
     updateStatus("EV auto mode");
     return;
   }
 
-  // PRIORITY 4: High SOC protection (overcharge) - only when no EV auto mode
+  // PRIORITY 4: High SOC protection (overcharge)
   // Run dumps at maximum safe level (up to inverter discharge limit)
   if (state.batterySOC > config.soc.targetSOC) {
     logDebug("Battery SOC above target (" + state.batterySOC + "% > " +

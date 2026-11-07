@@ -220,8 +220,20 @@ test("the actual draw is read when observing, the intended when controlling", ()
     "controlling on the measurement is what closes the feedback loop");
 });
 
-// ===== The two headroom reserves =====
-// 200 W battery reserve, or 2 A of EVSE headroom instead when it charges in auto.
+// ===== Headroom =====
+// 200 W for the battery, or the EVCS headroom while it is in auto with a car.
+
+const BATTERY = 200;
+
+// A controller with 5 kW of surplus and the EVCS in the given mode, status and draw.
+function evcs(mode, status, power) {
+  const { mod } = loadController();
+  mod.state.solarPower = 5000;
+  mod.state.evChargerMode = mode;
+  mod.state.evChargerStatus = status;
+  mod.state.evChargerPower = power || 0;
+  return mod;
+}
 
 test("battery headroom is held back from the surplus", () => {
   const { mod } = loadController();
@@ -231,45 +243,68 @@ test("battery headroom is held back from the surplus", () => {
     1000 - mod.config.dumpLoad.batteryHeadroom);
 });
 
-test("an EV charging in auto is left its next step, and the battery reserve drops", () => {
-  const { mod } = loadController();
-  mod.state.solarPower = 5000;
-  mod.state.evChargerMode = 1;      // Auto
-  mod.state.evChargerStatus = 2;    // Charging
-  mod.state.evChargerPower = 7000;  // 360 W short of its ceiling
+test("an EVCS waiting in auto is left its 6 A minimum, and the battery its 200 W", () => {
+  for (const status of [4, 21]) {    // Waiting for sun, Starting to charge
+    const mod = evcs(1, status);
 
-  assert.strictEqual(mod.isEvChargingInAuto(), true);
-  assert.strictEqual(mod.calculateAvailablePower(false), 5000 - 360,
-    "the reserve is what the charger can still take, and the battery's 200 W is not " +
-    "also held back");
+    assert.strictEqual(mod.isEvcsAutoWithCar(), true);
+    assert.strictEqual(mod.calculateAvailablePower(false), 5000 - 1380 - BATTERY,
+      "status " + status + ": the EVCS starts only on surplus it can see, and an idle " +
+      "charger takes no trickle off the battery");
+  }
 });
 
-test("a charger with room to step up reserves the full 2 A margin", () => {
-  const { mod } = loadController();
-  mod.state.solarPower = 5000;
-  mod.state.evChargerMode = 1;
-  mod.state.evChargerStatus = 2;
-  mod.state.evChargerPower = 0;
+test("an EVCS starting to draw keeps the rest of its minimum", () => {
+  const mod = evcs(1, 2, 600);      // ramping towards 6 A
 
-  assert.strictEqual(mod.calculateAvailablePower(false), 5000 - 460,
+  assert.strictEqual(mod.calculateAvailablePower(false), 5000 - 780,
+    "the 600 W drawn is already in AC consumption; the rest of the minimum is still held");
+});
+
+test("from 920 W drawn the EVCS headroom is one 2 A step", () => {
+  assert.strictEqual(evcs(1, 2, 900).getEvcsHeadroom(), 480);
+  assert.strictEqual(evcs(1, 2, 920).getEvcsHeadroom(), 460);
+  assert.strictEqual(evcs(1, 2, 2500).calculateAvailablePower(false), 5000 - 460,
     "460 W is one 2 A step at 230 V, not the charger's whole 7360 W ceiling");
 });
 
-test("connected is not charging, and manual is not auto", () => {
-  const { mod } = loadController();
-  mod.state.solarPower = 1000;
+test("near its ceiling the EVCS is left what it can still take, and never less than 0", () => {
+  assert.strictEqual(evcs(1, 2, 7000).calculateAvailablePower(false), 5000 - 360,
+    "the battery's 200 W is not also held back while it charges");
+  assert.strictEqual(evcs(1, 2, 7360).getEvcsHeadroom(), 0);
+  assert.strictEqual(evcs(1, 2, 7600).getEvcsHeadroom(), 0,
+    "a reading over the ceiling must not add to the surplus");
+});
 
+test("a negative EVCS power reads as nothing drawn", () => {
+  assert.strictEqual(evcs(1, 4, -50).getEvcsHeadroom(), 1380);
+});
+
+test("disconnected, connected, charged, stopped, manual and scheduled leave nothing to the EVCS", () => {
+  for (const [mode, status] of [[1, 0], [1, 1], [1, 3], [1, 6], [0, 2], [0, 4], [2, 2]]) {
+    const mod = evcs(mode, status, 0);
+
+    assert.strictEqual(mod.isEvcsAutoWithCar(), false, "mode " + mode + " status " + status);
+    assert.strictEqual(mod.calculateAvailablePower(false), 5000 - BATTERY,
+      "only auto bids for surplus, and an absent, idle, full or stopped car will not use it");
+  }
+});
+
+test("surplus under the EVCS minimum sheds every stage while a car waits", () => {
+  const { mod, published } = loadController();
+  dumping(mod);
+  mod.state.vebusState = INVERTING;
+  mod.state.batterySOC = 97;
   mod.state.evChargerMode = 1;
-  mod.state.evChargerStatus = 1;    // plugged in, not drawing
-  assert.strictEqual(mod.isEvChargingInAuto(), false);
+  mod.state.evChargerStatus = 4;
+  mod.state.acConsumption = 3 * HEATER;       // the dumps themselves
+  mod.state.intendedDumpPower = 3 * HEATER;
+  mod.state.solarPower = 1500;               // 1.5 kW of surplus once they are added back
 
-  mod.state.evChargerStatus = 2;
-  mod.state.evChargerMode = 0;      // Manual: it is not bidding for surplus
-  assert.strictEqual(mod.isEvChargingInAuto(), false);
+  mod.checkSystemState();
 
-  assert.strictEqual(mod.calculateAvailablePower(false),
-    1000 - mod.config.dumpLoad.batteryHeadroom,
-    "neither case yields the reserve to the charger");
+  assert.deepStrictEqual(switchCommands(published), [false, false, false],
+    "1500 W less 1380 W headroom and 200 W for the battery is under minSurplus");
 });
 
 // ===== The priority ladder =====
@@ -310,19 +345,21 @@ test("SOC below target suppresses, whatever the surplus", () => {
   assert.ok(log.indexOf("Low SOC") !== -1, log);
 });
 
-test("an EV charging in auto takes surplus control, not the maximum dump", () => {
-  const { mod } = loadController();
-  dumping(mod);
-  mod.state.vebusState = INVERTING;
-  mod.state.batterySOC = 99;        // high enough for the max-dump branch
-  mod.state.evChargerMode = 1;
-  mod.state.evChargerStatus = 2;
+test("an EVCS in auto with a car takes surplus control, not the maximum dump", () => {
+  for (const status of [2, 4, 21]) {
+    const { mod } = loadController();
+    dumping(mod);
+    mod.state.vebusState = INVERTING;
+    mod.state.batterySOC = 99;      // high enough for the max-dump branch
+    mod.state.evChargerMode = 1;
+    mod.state.evChargerStatus = status;
 
-  const log = captureLog(() => mod.checkSystemState());
+    const log = captureLog(() => mod.checkSystemState());
 
-  assert.ok(log.indexOf("EV auto mode") !== -1,
-    "max dumps would make the EVSE back off, and the two would trade the surplus " +
-    "back and forth: " + log);
+    assert.ok(log.indexOf("EV auto mode") !== -1,
+      "status " + status + ": max dumps discharge the battery, which the EVCS reads as " +
+      "no surplus at all: " + log);
+  }
 });
 
 test("above target it dumps to the inverter limit, at target it tracks surplus", () => {

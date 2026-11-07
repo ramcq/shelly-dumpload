@@ -29,6 +29,11 @@ A mode of use, not a device class: an electrical load run for the purpose of dis
 surplus rather than because someone asked for its output.
 _Avoid_: Diversion load, sink
 
+**EVCS**:
+The Victron EV Charging Station on the inverter output. In Auto it charges only on surplus it
+can see, from a 6 A minimum.
+_Avoid_: EVSE, wallbox, EV charger
+
 ### Heat
 
 **Buffer**:

@@ -154,6 +154,24 @@ a stage at its nominal power, so a stage must stay put long enough to be measure
 `minSurplus` (100 W available, with the dumps' own draw added back) every stage goes off
 regardless, since that means the battery is carrying the dumps.
 
+**An EVCS in Auto with a car is left headroom to start and to climb.** It starts only once it
+sees its 6 A minimum as surplus, and steps up only on surplus it can see, while the dumps take
+every watt not held back. So the surplus controller holds back the 6 A minimum, less what the
+EVCS already draws, since that is already house load. This covers the ramp, when it reports
+Charging before its draw appears. Past the minimum it holds back one 2 A step at a time, not
+the 32 A ceiling, because a car may charge slower than that. Above target SOC it tracks
+surplus rather than dumping to the inverter limit: that discharges the battery, which the
+EVCS reads as no surplus at all. Connected (1) is left out: in Auto a car waiting for
+surplus reports Waiting for sun, so Connected is a car not asking for charge, which would
+hold the headroom and suppress the high-SOC dump for nothing.
+
+**The EVCS's own SoC settings must fit around the dumps and the generator.** Its start SoC
+must be below the surplus controller's 97% target, or the dumps hold SoC there and the EVCS
+waits at Low SOC forever. Below the start SoC the battery comes first. Between it and 97% the
+car comes before topping up the battery, and the dumps get what is left only from 97%. Its
+off-grid stop SoC must be above the generator's 20% autostart, so the car never starts the
+generator. The values live on the EVCS.
+
 **Overload risk, still open.** The surplus controller limits its own loads' inverter
 contribution, and each DHW immersion has a generation gate and a headroom check, but nothing
 arbitrates between them. If several dump loads are on and generation drops away (a hydro
@@ -265,7 +283,7 @@ would see the stat, valve and pump load: useful for diagnostics, not needed for 
 off, so SOC climbs on hydro whether or not the boiler lit, and the immersions return at 90%.
 A jammed hopper becomes a slow return to electric heating over about a day.
 
-**The EVSE is not shed on shortage.** Manual mode means charge regardless. Auto mode stops on
+**The EVCS is not shed on shortage.** Manual mode means charge regardless. Auto mode stops on
 its own surplus criteria.
 
 **No threshold is exposed on any device.** Every relay's numbers live in one table in the
