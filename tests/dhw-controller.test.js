@@ -72,11 +72,37 @@ function clockUnsynchronised() {
   };
 }
 
+// Shortage begins at `hhmm` on a buffer too cold for a window: it waits for the heat.
+function enterShortageCold(mod, hhmm) {
+  settle(mod, false);
+  clockAt(hhmm);
+  bufferTop(mod, 44);
+  boilerFlow(mod, 30);
+  pastStartupGrace(mod);
+  lock(mod, false);
+  mod.checkSystemState();
+}
+
+// Shortage begins at `hhmm` on a hot buffer: the entry window opens.
+function enterShortageHot(mod, hhmm) {
+  clockAt(hhmm);
+  bufferTop(mod, 70);
+  boilerFlow(mod, 72);
+  lock(mod, false);
+  mod.checkSystemState();
+}
+
+// The entry window neither open nor waiting to open.
+function noEntryWindow(mod) {
+  mod.state.entryWindowWaiting = false;
+  mod.state.entryWindowUntilUptime = null;
+}
+
 // Shortage, the 05:00 slot, a hot buffer and no entry window.
 function windowConditions(mod) {
   clockAt("05:20");
   lock(mod, false);
-  mod.state.entryWindowUntilUptime = null;
+  noEntryWindow(mod);
   bufferTop(mod, 65);
   boilerFlow(mod, 68);
 }
@@ -428,14 +454,184 @@ test("the entry window is guarded like any other", () => {
   assert.deepStrictEqual(switchCommands(calls), []);
 });
 
-test("the entry window lasts an hour", () => {
+test("a cold buffer at entry waits for the heat, then opens the window", () => {
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  clockAt("00:34");
+  bufferTop(mod, 44);
+  boilerFlow(mod, 30);
+  pastStartupGrace(mod);
+
+  lock(mod, false);
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), []);
+
+  advanceClock(90 * MINUTES);   // released at 30 min, hot an hour later
+  clockAt("02:04");
+  bufferTop(mod, 61);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+  assert.strictEqual(mod.state.windowKey, "entry");
+});
+
+test("the hour runs from the heat arriving, not from entering shortage", () => {
+  const { mod, calls } = loadEnable();
+  enterShortageCold(mod, "00:34");
+
+  advanceClock(90 * MINUTES);
+  clockAt("02:04");
+  bufferTop(mod, 61);
+  mod.checkSystemState();
+  settle(mod, true);
+
+  advanceClock(mod.config.window.entryWindowLength - MINUTES);
+  clockAt("03:03");
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), [true], "the hour was counted from 00:34");
+
+  advanceClock(2 * MINUTES);
+  clockAt("03:05");
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), [true, false]);
+});
+
+test("heat arriving inside a slot still gets a full hour", () => {
+  const { mod, calls } = loadEnable();
+  enterShortageCold(mod, "04:30");
+
+  advanceClock(50 * MINUTES);   // the heat arrives 20 minutes into the 05:00 slot
+  clockAt("05:20");
+  bufferTop(mod, 65);
+  mod.checkSystemState();
+  settle(mod, true);
+
+  advanceClock(50 * MINUTES);
+  clockAt("06:10");
+  mod.checkSystemState();
+  assert.deepStrictEqual(switchCommands(calls), [true], "the charge ended with the slot");
+
+  advanceClock(11 * MINUTES);
+  clockAt("06:21");
+  mod.checkSystemState();
+  settle(mod, false);
+  advanceClock(30 * MINUTES);
+  clockAt("06:51");
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true, false],
+    "the cylinders were charged twice outside the slots");
+});
+
+test("a window left over from the last shortage does not carry into the next", () => {
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  enterShortageHot(mod, "07:30");
+  settle(mod, true);
+  lock(mod, true);
+  mod.checkSystemState();
+  settle(mod, false);
+
+  advanceClock(20 * MINUTES);
+  clockAt("07:50");
+  bufferTop(mod, 44);
+  boilerFlow(mod, 30);
+  lock(mod, false);
+  mod.checkSystemState();
+
+  assert.strictEqual(mod.state.windowKey, "");
+  assert.deepStrictEqual(switchCommands(calls), [true, false]);
+});
+
+test("a shortage that ends before the heat arrives leaves nothing behind", () => {
+  const { mod, calls } = loadEnable();
+  enterShortageCold(mod, "07:30");
+  lock(mod, true);
+
+  bufferTop(mod, 70);   // the burn completes after the shortage
+  mod.checkSystemState();
+  advanceClock(30 * MINUTES);
+  clockAt("08:00");
+  lock(mod, false);     // the next shortage: one window, an hour long
+  mod.checkSystemState();
+  settle(mod, true);
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+
+  advanceClock(45 * MINUTES);
+  clockAt("08:45");
+  mod.checkSystemState();
+  advanceClock(16 * MINUTES);
+  clockAt("09:01");
+  mod.checkSystemState();
+  settle(mod, false);
+  advanceClock(MINUTES);
+  clockAt("09:02");
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true, false]);
+});
+
+test("no window is announced once the shortage is over", () => {
+  const { mod } = loadEnable();
+  enterShortageCold(mod, "07:30");
+  lock(mod, true);
+
+  bufferTop(mod, 70);
+  const log = captureLog(function () { mod.checkSystemState(); });
+
+  assert.doesNotMatch(log, /opening/i);
+});
+
+test("entering shortage with the buffer unreadable opens the window blind", () => {
   const { mod, calls } = loadEnable();
   settle(mod, false);
   clockAt("07:30");
-  bufferTop(mod, 70);
-  boilerFlow(mod, 72);
+  bufferTop(mod, 44);
+  boilerFlow(mod, 30);
+  bridge(mod, false);
+
   lock(mod, false);
   mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+  assert.strictEqual(mod.state.windowKey, "entry");
+  assert.strictEqual(mod.state.windowBlind, true);
+});
+
+test("a slot on a cold buffer leaves the entry window waiting", () => {
+  const { mod, calls } = loadEnable();
+  enterShortageCold(mod, "04:30");
+
+  advanceClock(40 * MINUTES);
+  clockAt("05:10");
+  mod.checkSystemState();
+  assert.strictEqual(mod.state.windowKey, "05:00");
+
+  advanceClock(60 * MINUTES);
+  clockAt("06:10");
+  bufferTop(mod, 65);
+  mod.checkSystemState();
+
+  assert.deepStrictEqual(switchCommands(calls), [true]);
+  assert.strictEqual(mod.state.windowKey, "entry");
+});
+
+test("the status line says the entry window is waiting for the heat", () => {
+  const { mod } = loadEnable();
+  clockAt("07:30");
+  bufferTop(mod, 44);
+  boilerFlow(mod, 30);
+  pastStartupGrace(mod);
+  lock(mod, false);
+  mod.checkSystemState();
+
+  assert.match(statusText(mod), /Window entry waiting/);
+});
+
+test("the entry window lasts an hour", () => {
+  const { mod, calls } = loadEnable();
+  settle(mod, false);
+  enterShortageHot(mod, "07:30");
   assert.deepStrictEqual(switchCommands(calls), [true]);
   settle(mod, true);
 
@@ -448,11 +644,7 @@ test("the entry window lasts an hour", () => {
 test("an entry window running into a scheduled slot is one window, not two", () => {
   const { mod, calls } = loadEnable();
   settle(mod, false);
-  clockAt("04:40");
-  bufferTop(mod, 70);
-  boilerFlow(mod, 72);
-  lock(mod, false);
-  mod.checkSystemState();
+  enterShortageHot(mod, "04:40");
   assert.deepStrictEqual(switchCommands(calls), [true]);
   settle(mod, true);
 
@@ -471,13 +663,13 @@ test("a shortage that has already begun is not re-entered on every lock message"
   // .209 republishes its status on every reconnect.
   const { mod } = loadEnable();
   settle(mod, false);
-  clockAt("07:30");
-  lock(mod, false);
+  enterShortageHot(mod, "07:30");
   const openedAt = mod.state.entryWindowUntilUptime;
   assert.ok(openedAt !== null);
 
   mod.state.entryWindowUntilUptime = openedAt - (30 * MINUTES);
   lock(mod, false);
+  mod.checkSystemState();
 
   assert.strictEqual(mod.state.entryWindowUntilUptime, openedAt - (30 * MINUTES),
     "a republish restarted the entry window");
@@ -515,7 +707,7 @@ test("a blind window keeps to its slots rather than running on", () => {
   windowConditions(mod);
   bridge(mod, false);
   clockAt("07:30");
-  mod.state.entryWindowUntilUptime = null;
+  noEntryWindow(mod);
 
   mod.checkSystemState();
 
@@ -647,7 +839,7 @@ test("a device that has never synchronised runs no scheduled slots", () => {
   bufferTop(mod, 75);
   boilerFlow(mod, 78);
   clockUnsynchronised();
-  mod.state.entryWindowUntilUptime = null;
+  noEntryWindow(mod);
 
   mod.checkSystemState();
 
@@ -887,8 +1079,7 @@ test("a drop mid-window does not withdraw the window it was already holding", ()
 test("NTP landing does not cancel an entry window", () => {
   const { mod } = loadEnable();
   settle(mod, false);
-  clockAt("07:30");
-  lock(mod, false);
+  enterShortageHot(mod, "07:30");
   assert.strictEqual(mod.state.windowKey, "entry");
 
   withJumpedWallClock(function () { mod.checkSystemState(); });
@@ -900,8 +1091,8 @@ test("NTP landing does not cancel an entry window", () => {
 test("the entry window still ends, on the clock that cannot jump", () => {
   const { mod } = loadEnable();
   settle(mod, false);
-  clockAt("07:30");
-  lock(mod, false);
+  enterShortageHot(mod, "07:30");
+  assert.strictEqual(mod.currentWindowKey(), "entry");
 
   advanceClock(mod.config.window.entryWindowLength + 1000);
   mod.checkSystemState();

@@ -211,9 +211,14 @@ DHW Enable (.123) closes when **either**:
 - **A shortage DHW window is open.** In shortage the heat pump is locked and the immersions
   are shed, so the buffer is the only route to hot water.
 
-**Windows are one hour in six:** 05:00, 11:00, 17:00 and 23:00, plus one on entering
-shortage so that a shortage starting at 07:30 does not wait until 11:00. Fixed times survive
-a reboot with nothing stored. A partial charge resumes six hours later.
+**Windows are one hour in six:** 05:00, 11:00, 17:00 and 23:00, plus one from the first time
+the guard passes in a shortage, so that a shortage starting at 07:30 does not wait until 11:00.
+Fixed times survive a reboot with nothing stored. A partial charge resumes six hours later.
+
+**The entry window waits for the heat.** The boiler is released 30 minutes into shortage and
+takes about another hour to bring the house loop to 60 °C, so an hour counted from the lock
+opening would pass on a cold buffer. The hour runs from the guard passing instead, inside a
+slot or not, which keeps the one-hour bound without guessing how long the boiler takes.
 
 **Buffer temperature guards a window.** A window on a cold buffer would strip heat back out
 of the cylinders, so it needs **buffer top or boiler flow ≥ 60 °C**. Buffer top measures

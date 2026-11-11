@@ -6,7 +6,8 @@
 //
 // Ladder, first match wins:
 //   1. The time clock, on this relay's own input, unconditionally
-//   2. A shortage DHW window: one hour in six, guarded on buffer temperature
+//   2. A shortage DHW window: one hour in six, plus one when the buffer is first hot
+//      enough in a shortage; guarded on buffer temperature
 //
 // Rules and reasoning in CONTROLS.md#dhw.
 
@@ -35,7 +36,7 @@ let config = {
   // The shortage DHW window. See CONTROLS.md#dhw.
   window: {
     slotHours: ["05", "11", "17", "23"], // Local hours, as sys.time writes them
-    entryWindowLength: 60 * 60 * 1000,   // ms; the window on entering shortage
+    entryWindowLength: 60 * 60 * 1000,   // ms; from the guard first passing in shortage
     minBufferTemp: 60                    // degC; the higher of buffer top and boiler flow
   },
 
@@ -97,6 +98,7 @@ let state = {
   windowKey: "",             // "05:00" etc., "entry", or "" for none
   windowBlind: false,        // Latched unguarded, with no buffer reading
   windowLatched: false,      // Guard passed; holds until the window ends
+  entryWindowWaiting: false, // Shortage entered; the entry window waits for the guard
   entryWindowUntilUptime: null,  // Uptime the entry window ends at
 
   // Timer
@@ -245,6 +247,21 @@ function currentWindowKey() {
   return "";
 }
 
+// Starts the entry window's hour once the guard passes, or at once if unguarded.
+function openEntryWindowWhenHot() {
+  if (!state.entryWindowWaiting) {
+    return;
+  }
+
+  if (!guardSatisfied() && !bufferUnreadable()) {
+    return;
+  }
+
+  state.entryWindowWaiting = false;
+  state.entryWindowUntilUptime = state.nowUptime + config.window.entryWindowLength;
+  console.log("Opening the shortage entry DHW window for the next hour");
+}
+
 function updateWindow() {
   let key = currentWindowKey();
 
@@ -328,7 +345,7 @@ function updateStatus(event) {
   let clockPart = ", Clock " + (state.inputIsActive ? "ON" : "OFF");
 
   let windowPart = ", Window " + (state.windowKey === ""
-    ? "-"
+    ? (state.entryWindowWaiting ? "entry waiting" : "-")
     : state.windowKey + (state.windowLatched ? " held" : " waiting") +
       (state.windowBlind ? " (blind)" : ""));
 
@@ -404,7 +421,7 @@ function finishSetup() {
   console.log("Device: " + state.deviceName);
   console.log("The time clock closes the enable unconditionally, on this relay's input");
   console.log("Shortage DHW windows: " + slots.join(", ") +
-             ", plus one on entering shortage");
+             ", plus one when the buffer is first hot in a shortage");
   console.log("Window guard: buffer top or boiler flow at or above " +
              config.window.minBufferTemp + " degC");
   console.log("Heat Pump Lock Monitoring: " + config.heatPumpLock.statusTopic);
@@ -482,9 +499,10 @@ function processMqttMessage(topic, message) {
                      (state.lockIsClosed ? "closed - no shortage" : "open - SHORTAGE"));
 
           // Edges only: .209 republishes its status on every reconnect.
-          if (!state.lockIsClosed) {
-            state.entryWindowUntilUptime = state.nowUptime + config.window.entryWindowLength;
-            console.log("Opening a DHW window for the next hour");
+          state.entryWindowWaiting = !state.lockIsClosed;
+          state.entryWindowUntilUptime = null;
+          if (state.entryWindowWaiting) {
+            console.log("Shortage entry DHW window waiting for the buffer");
           }
 
           updateWindow();
@@ -793,6 +811,7 @@ function outstandingReadings() {
 function checkSystemState() {
   refreshUptime();
 
+  openEntryWindowWhenHot();
   updateWindow();
   updateWindowGuard();
   updateStatus("Monitoring");

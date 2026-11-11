@@ -267,8 +267,9 @@ DHW demand: .164 reads this device's input, never its relay
 The rules are in [CONTROLS.md](CONTROLS.md#dhw).
 
 - **Slots:** `window.slotHours` (05, 11, 17, 23) against the first two characters of
-  `sys.time`; none without a synchronised clock. The lock opening starts an entry window of
-  `window.entryWindowLength` (1 hour), which needs no clock.
+  `sys.time`; none without a synchronised clock. Once per shortage, an entry window of
+  `window.entryWindowLength` (1 hour) starts when the guard first passes, or at once if
+  unguarded, slot or not; it needs no clock. The lock closing cancels it.
 - **Guard:** the higher of buffer top (`temperature/100`) and boiler flow (`temperature/103`);
   a reading that has not arrived is left out, not read as cold.
 - **Unguarded:** with `temperature/100/Connected` at 0, or no reading for `startupGrace`
@@ -277,8 +278,8 @@ The rules are in [CONTROLS.md](CONTROLS.md#dhw).
 - **Latch:** once the guard passes, the enable stays closed to the end of the window, and
   across two windows that touch. The latch is set in the poll that commands the relay.
 - **Restart:** nothing is stored. A relay found closed is left alone while the lock or a
-  temperature is outstanding, up to `startupGrace`. A restart during shortage opens an entry
-  window. Polls every 30 s.
+  temperature is outstanding, up to `startupGrace`. A restart during shortage waits for a
+  new entry window. Polls every 30 s.
 
 **What it reads.** Four subscriptions: .209's `switch:0` status,
 `temperature/100/Temperature`, `temperature/103/Temperature` and `temperature/100/Connected`.
@@ -294,7 +295,7 @@ and leaves the time clock passing through in hardware. `follow` with
 `config.heatPumpLock`; `config.device`.
 
 **Virtual components.** `text:200`, the status line: relay, lock, buffer top, boiler flow,
-time clock, window (`held` / `waiting`) and the enable reason.
+time clock, window (`held` / `waiting`, or `entry waiting`) and the enable reason.
 
 ## Common Patterns
 
